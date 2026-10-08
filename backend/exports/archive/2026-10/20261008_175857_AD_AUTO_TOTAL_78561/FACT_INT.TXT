@@ -1,0 +1,19 @@
+[InfoPachet]
+AnLucru=2026
+LunaLucru=10
+TipDocument=FACTURA INTRARE
+TotalFacturi=1
+
+[Factura_1]
+NumarDoc=78561
+Data=06.10.2026
+DenumireFurnizor=AD AUTO TOTAL
+CodFurnizor=RO6844726
+Moneda=lei
+CotaTVA=21
+TotalFaraTVA=33.66
+TotalTVA=7.07
+
+[Items_1]
+Item_1=F89-40003.25;SET 25 BUC AGRAFE FA1;Buc;1;23.9600;23.96;21;MAGAZIE
+Item_2=F89-40003.10;SET 10 BUC AGRAFE FA1;Buc;1;9.7000;9.70;21;MAGAZIE

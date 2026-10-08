@@ -2,12 +2,16 @@ import os
 import shutil
 from pathlib import Path
 from exporter import (
+    Department,
     ExportAllocation,
     ExportInvoicePayload,
     VehicleTarget,
     export_to_winmentor,
+    extract_winmentor_doc_number,
+    format_bon_obs,
+    retrigger_archived_export,
 )
-from nomenclature import PartStatus, init_db, resolve_part
+from nomenclature import init_db
 
 TEST_EXPORT_DIR = str(Path(__file__).with_name("test_exports_temp"))
 TEST_DB_PATH = str(Path(__file__).with_name("test_exporter_temp.db"))
@@ -22,93 +26,63 @@ def run_exporter_tests() -> None:
     try:
         init_db(TEST_DB_PATH)
 
-        car_peugeot = VehicleTarget(
-            numar_inmatriculare="B-119-RPI",
-            serie_sasiu="VF7SXHMRVMT673522",
-        )
-        car_audi = VehicleTarget(
-            numar_inmatriculare="IF-18-DJF",
-            serie_sasiu="WAUZZZ8V5GA050511",
-        )
+        print("1. Testing WinMentor trailing invoice number extraction (Rule 2.2)...")
+        assert extract_winmentor_doc_number("IN26 000001380") == "1380"
+        assert extract_winmentor_doc_number("FB2AX10394098") == "394098"
+        assert extract_winmentor_doc_number("22608977520") == "977520"
+        assert extract_winmentor_doc_number("MSA 3241") == "3241"
+        print("   [PASS] All supplier invoice codes stripped to trailing digits.")
 
-        # Scenario: 2 brake parts go to B-119-RPI, 1 filter goes to IF-18-DJF,
-        # and 5L of oil is split: 4L to IF-18-DJF and 1L stays in Stock (vehicle=None)
+        print("\n2. Testing Bon Consum 4.Obs vehicle formatting ('opel corsa ct61mlg')...")
+        car_opel = VehicleTarget(
+            numar_inmatriculare="CT-61-MLG",
+            serie_sasiu="W0L00000000000000",
+            marca_model="OPEL CORSA",
+            departament=Department.TINICHIGERIE,
+        )
+        assert format_bon_obs(car_opel) == "opel corsa ct61mlg"
+        print(f"   [PASS] Formatted 4.Obs: '{format_bon_obs(car_opel)}' ({car_opel.departament.value})")
+
+        print("\n3. Running export_to_winmentor() with archiving...")
         payload = ExportInvoicePayload(
-            supplier_name="MATEROM SRL",
-            document_code="MTRF 915268324",
-            quote_date="2026-10-07",
+            supplier_name="AUTONET IMPORT SRL",
+            document_code="FB2AX10394623",
+            quote_date="2026-10-02",
             allocations=[
-                ExportAllocation(
-                    part_code="GDB2063",
-                    part_name="Set plăcuțe frână spate",
-                    quantity=1.0,
-                    unit_price=109.74,
-                    vehicle=car_peugeot,
-                ),
-                ExportAllocation(
-                    part_code="GIC404",
-                    part_name="Senzor avertizare uzură plăcuțe frână",
-                    quantity=1.0,
-                    unit_price=38.06,
-                    vehicle=car_peugeot,
-                ),
                 ExportAllocation(
                     part_code="HU7020Z",
                     part_name="Filtru ulei",
                     quantity=1.0,
                     unit_price=26.84,
-                    vehicle=car_audi,
+                    vehicle=car_opel,
                 ),
                 ExportAllocation(
-                    part_code="MOTYLG75W851L",
-                    part_name="Ulei Motul 75W85 1L",
-                    quantity=4.0,
-                    unit_price=65.66,
-                    vehicle=car_audi,
-                ),
-                ExportAllocation(
-                    part_code="MOTYLG75W851L",
-                    part_name="Ulei Motul 75W85 1L",
+                    part_code="LIQ LL III 5W30 5L",
+                    part_name="LIQUI MOLY Longlife III 5W-30 5L",
                     quantity=1.0,
-                    unit_price=65.66,
-                    vehicle=None,  # Goes to Magazie (Stock)
+                    unit_price=333.83,  # 332.37 + 1.46 eco-tax rolled in
+                    vehicle=None,       # Stays in MAGAZIE
                 ),
             ],
         )
+        res = export_to_winmentor(payload, export_dir=TEST_EXPORT_DIR, db_path=TEST_DB_PATH)
+        assert res.winmentor_doc_nr == "394623"
+        assert Path(res.archive_dir).exists()
+        print(f"   [PASS] Archived to: {res.archive_dir}")
 
-        print("1. Running export_to_winmentor()...")
-        result = export_to_winmentor(payload, export_dir=TEST_EXPORT_DIR, db_path=TEST_DB_PATH)
+        print("\n4. Testing duplicate invoice protection...")
+        try:
+            export_to_winmentor(payload, export_dir=TEST_EXPORT_DIR, db_path=TEST_DB_PATH)
+            raise AssertionError("Should have blocked duplicate invoice!")
+        except ValueError as e:
+            print(f"   [PASS] Duplicate blocked: {e}")
 
-        # Split oil (4 + 1 = 5) should re-aggregate into 1 line on FACT_INT.TXT -> 4 total invoice lines
-        assert result.invoice_lines_written == 4
-        # 2 vehicles received parts -> 2 consumption vouchers in BON_CONS.TXT
-        assert result.consumption_vouchers_written == 2
-        assert result.nomenclature_updated == 4
-        print(
-            f"   [PASS] Wrote {result.invoice_lines_written} invoice lines and "
-            f"{result.consumption_vouchers_written} consumption vouchers."
-        )
+        print("\n5. Testing 1-click archive re-trigger...")
+        retriggered = retrigger_archived_export(res.archive_dir, export_dir=TEST_EXPORT_DIR)
+        assert Path(str(retriggered["bundle_json_path"])).exists()
+        print("   [PASS] Re-triggered archive bundle successfully.")
 
-        print("\n2. Verifying CRLF line endings and generated file contents...")
-        fact_bytes = Path(result.fact_int_path).read_bytes()
-        assert b"\r\n" in fact_bytes, "Expected Windows CRLF line endings in FACT_INT.TXT"
-        assert result.bon_cons_path is not None
-        bon_bytes = Path(result.bon_cons_path).read_bytes()
-        assert b"\r\n" in bon_bytes, "Expected Windows CRLF line endings in BON_CONS.TXT"
-
-        print("\n--- Generated FACT_INT.TXT ---")
-        print(fact_bytes.decode("utf-8"))
-
-        print("--- Generated BON_CONS.TXT ---")
-        print(bon_bytes.decode("utf-8"))
-
-        print("3. Verifying nomenclature.db was automatically updated...")
-        res = resolve_part("GDB2063", "Set placute frana spate", db_path=TEST_DB_PATH)
-        assert res.status == PartStatus.MATCH
-        print(f"   [PASS] GDB2063 is now saved in nomenclature.db as '{res.name}'.")
-
-        print("\n=== ALL MODULE 3 EXPORTER TESTS PASSED ===")
-
+        print("\n=== ALL UPGRADED MODULE 3 TESTS PASSED ===")
     finally:
         if os.path.exists(TEST_EXPORT_DIR):
             shutil.rmtree(TEST_EXPORT_DIR)

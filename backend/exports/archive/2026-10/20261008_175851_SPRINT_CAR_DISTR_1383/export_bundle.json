@@ -1,0 +1,26 @@
+{
+  "factura_intrare": {
+    "furnizor": "SPRINT CAR DISTRIBUTION",
+    "cod_furnizor": "RO13632904",
+    "document_code_raw": "IN26 000001383",
+    "numar_doc_winmentor": "1383",
+    "data_winmentor": "07.10.2026",
+    "gestiune": "MAGAZIE",
+    "cota_tva": 21,
+    "total_fara_tva": 1072.29,
+    "total_tva": 225.18,
+    "total_de_plata": 1297.47,
+    "items": [
+      {
+        "part_code": "MB518",
+        "part_name": "FINE SILVER/3.5LT",
+        "um": "Buc",
+        "quantity": 3.5,
+        "unit_price": 306.369,
+        "valoare_fara_tva": 1072.29,
+        "valoare_tva": 225.18
+      }
+    ]
+  },
+  "bonuri_consum": []
+}

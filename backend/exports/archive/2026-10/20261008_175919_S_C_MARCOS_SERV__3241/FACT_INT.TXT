@@ -1,0 +1,18 @@
+[InfoPachet]
+AnLucru=2026
+LunaLucru=10
+TipDocument=FACTURA INTRARE
+TotalFacturi=1
+
+[Factura_1]
+NumarDoc=3241
+Data=01.10.2026
+DenumireFurnizor=S.C. MARCOS SERV AUTOMOBILE SRL
+CodFurnizor=RO33841085
+Moneda=lei
+CotaTVA=21
+TotalFaraTVA=991.74
+TotalTVA=208.27
+
+[Items_1]
+Item_1=USA;USA STANGA FATA DACIA DOKKER;Buc;1;991.7400;991.74;21;MAGAZIE

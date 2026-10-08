@@ -1,0 +1,35 @@
+{
+  "factura_intrare": {
+    "furnizor": "AD AUTO TOTAL",
+    "cod_furnizor": "RO6844726",
+    "document_code_raw": "22609078561",
+    "numar_doc_winmentor": "78561",
+    "data_winmentor": "06.10.2026",
+    "gestiune": "MAGAZIE",
+    "cota_tva": 21,
+    "total_fara_tva": 33.66,
+    "total_tva": 7.07,
+    "total_de_plata": 40.73,
+    "items": [
+      {
+        "part_code": "F89-40003.25",
+        "part_name": "SET 25 BUC AGRAFE FA1",
+        "um": "Buc",
+        "quantity": 1.0,
+        "unit_price": 23.96,
+        "valoare_fara_tva": 23.96,
+        "valoare_tva": 5.03
+      },
+      {
+        "part_code": "F89-40003.10",
+        "part_name": "SET 10 BUC AGRAFE FA1",
+        "um": "Buc",
+        "quantity": 1.0,
+        "unit_price": 9.7,
+        "valoare_fara_tva": 9.7,
+        "valoare_tva": 2.04
+      }
+    ]
+  },
+  "bonuri_consum": []
+}

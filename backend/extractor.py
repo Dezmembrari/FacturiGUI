@@ -1,3 +1,5 @@
+import os
+from talon_scanner import TalonCropConfig, prepare_talon_for_ocr
 import re
 import time
 from datetime import datetime
@@ -34,7 +36,9 @@ class SupplierQuote(BaseModel):
     supplier_name: str = Field(
         description="The name of the vendor/supplier (e.g., MATEROM, AUTONET IMPORT, AD AUTO TOTAL, SPRINT CAR DISTRIBUTION)."
     )
-    document_code: str = Field(description="The invoice or quote number (Serie și număr, e.g. 'FB2AX10394098', 'IN26 000001380').")
+    document_code: str = Field(
+        description="The invoice or quote number (Serie și număr, e.g. 'FB2AX10394098', 'IN26 000001380')."
+    )
     quote_date: str = Field(description="The date of the document in YYYY-MM-DD format.")
     parts: list[PartItem] = Field(description="The list of all auto parts and billable items on the quote/invoice.")
 
@@ -42,6 +46,10 @@ class SupplierQuote(BaseModel):
 class VehicleDocument(BaseModel):
     numar_inmatriculare: str = Field(description="The license plate number (Point A on the Talon).")
     serie_sasiu: str = Field(description="The 17-character Vehicle Identification Number or VIN (Point E on the Talon).")
+    marca_model: str = Field(
+        default="",
+        description="The vehicle make and commercial model (Points D.1 and D.3 on the Talon, e.g. 'OPEL CORSA', 'PEUGEOT 208').",
+    )
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -71,6 +79,41 @@ RETRY_SAME_MODEL_TAGS = ("503", "UNAVAILABLE")
 def _normalize_code(code: str) -> str:
     """Canonical form of a part code: trimmed, inner whitespace collapsed, uppercase."""
     return re.sub(r"\s+", " ", code).strip().upper()
+
+
+def _is_eco_tax_line(item: PartItem) -> bool:
+    """Detects environmental / lubricant fund tax lines ('Taxa fond mediu lubrifianti')."""
+    code_up = item.part_code.upper()
+    name_low = item.part_name.lower()
+    return (
+        "TAXA_MEDIU" in code_up
+        or "TAXA MEDIU" in code_up
+        or ("taxa" in name_low and "mediu" in name_low)
+    )
+
+
+def _rollup_eco_taxes(parts: list[PartItem]) -> list[PartItem]:
+    """
+    Rolls 'Taxa fond mediu lubrifianti' into the preceding lubricant/oil line item
+    so the tax is included in the product's value rather than exported as a separate row.
+    """
+    merged: list[PartItem] = []
+    for item in parts:
+        if _is_eco_tax_line(item) and merged:
+            target = merged[-1]
+            new_total = round(target.total_price + item.total_price, 2)
+            qty = target.quantity if target.quantity != 0 else 1.0
+            new_unit = round(new_total / qty, 4)
+            merged[-1] = PartItem(
+                part_code=target.part_code,
+                part_name=target.part_name,
+                quantity=target.quantity,
+                unit_price=new_unit,
+                total_price=new_total,
+            )
+        else:
+            merged.append(item)
+    return merged
 
 
 def _generate_structured(gemini_file: types.File, prompt: str, schema: type[T]) -> T:
@@ -179,27 +222,59 @@ def extract_quote_data(file_path: str) -> SupplierQuote:
         item.part_code = _normalize_code(item.part_code)
         item.part_name = re.sub(r"\s+", " ", item.part_name).strip()
 
+    quote.parts = _rollup_eco_taxes(quote.parts)
     return quote
 
 
-def extract_vehicle_data(file_path: str) -> VehicleDocument:
-    """Uploads a Talon or CIV photo and extracts the core vehicle identifiers."""
+# def extract_vehicle_data(file_path: str) -> VehicleDocument:
+#     """Uploads a Talon or CIV photo and extracts the license plate, VIN, and Make/Model."""
+#     prompt = """
+#     Extract the vehicle registration data from this Romanian vehicle document (Talon / CIV).
+#     Copy the license plate (Point A), the 17-character VIN (Point E), and the Make + Model
+#     (Points D.1 and D.3, e.g. 'OPEL CORSA' or 'PEUGEOT 208') as printed.
+#     A VIN has 17 characters and never contains the letters I, O or Q.
+#     Do not guess characters you cannot read.
+#     """
+#     gemini_file = client.files.upload(file=file_path)
+#     try:
+#         doc = _generate_structured(gemini_file, prompt, VehicleDocument)
+#     finally:
+#         _delete_quietly(gemini_file)
+
+#     doc.serie_sasiu = doc.serie_sasiu.upper().replace(" ", "")
+#     doc.numar_inmatriculare = doc.numar_inmatriculare.upper().strip()
+#     doc.marca_model = re.sub(r"\s+", " ", doc.marca_model).strip().upper()
+#     return doc
+
+def extract_vehicle_data(
+    file_path: str, crop_config: TalonCropConfig | None = None
+) -> VehicleDocument:
+    """
+    1. Locally perspective-flattens the Talon photo, crops ONLY the Top-Left A-to-K region,
+       and converts it into a high-contrast monochrome scan via talon_scanner.py.
+    2. Uploads ONLY that cropped A-to-K scan image to Gemini and deletes it immediately after.
+    """
     prompt = """
-    Extract the vehicle registration data from this Romanian vehicle document.
-    Copy the license plate and the VIN exactly as printed, character by character.
+    Extract the vehicle registration data from this cropped Top-Left (A to K) section of a
+    Romanian vehicle registration document (Talon / Certificat de inmatriculare).
+    Copy the license plate (Field A), the 17-character VIN (Field E), and the Make + Model
+    (Fields D.1 and D.3, e.g. 'OPEL CORSA' or 'PEUGEOT 208') exactly as printed.
     A VIN has 17 characters and never contains the letters I, O or Q.
     Do not guess characters you cannot read.
     """
-    gemini_file = client.files.upload(file=file_path)
+    cropped_scan_path = prepare_talon_for_ocr(file_path, custom_crop=crop_config)
+    gemini_file = client.files.upload(file=cropped_scan_path)
     try:
         doc = _generate_structured(gemini_file, prompt, VehicleDocument)
     finally:
         _delete_quietly(gemini_file)
+        if os.path.exists(cropped_scan_path):
+            os.remove(cropped_scan_path)
 
     doc.serie_sasiu = doc.serie_sasiu.upper().replace(" ", "")
     doc.numar_inmatriculare = doc.numar_inmatriculare.upper().strip()
+    doc.marca_model = re.sub(r"\s+", " ", doc.marca_model).strip().upper()
     return doc
-
 
 # --- Validation: call these after extraction and surface the warnings to the user ---
 

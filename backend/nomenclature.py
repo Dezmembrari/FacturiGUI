@@ -18,10 +18,8 @@ DEFAULT_DB_PATH = str(Path(os.environ.get("NOMENCLATURE_DB", Path(__file__).with
 # Names: two names count as "the same description" when one's words are all contained in the
 # other's, or when at least this fraction of their combined words are shared.
 NAME_SIMILARITY_THRESHOLD = 0.5
-
-# Codes (all comparisons use the separator-free form, see compact_code):
-MIN_EXTENSION_LEN = 5        # shortest code allowed to be a prefix of another without a space boundary
-FUZZY_CODE_THRESHOLD = 0.85  # minimum character similarity for an "OCR-lookalike" suggestion
+MIN_EXTENSION_LEN = 5
+FUZZY_CODE_THRESHOLD = 0.85
 MAX_SUGGESTIONS = 5
 
 # Characters OCR commonly confuses; used only to make fuzzy code comparison forgiving.
@@ -32,7 +30,17 @@ _SCHEMA = """
         part_code TEXT NOT NULL PRIMARY KEY,
         part_name TEXT NOT NULL,
         last_used TEXT
-    )
+    );
+    CREATE TABLE IF NOT EXISTS exports_log (
+        doc_key TEXT NOT NULL PRIMARY KEY,
+        supplier_name TEXT NOT NULL,
+        document_code TEXT NOT NULL,
+        winmentor_doc_nr TEXT NOT NULL,
+        quote_date TEXT NOT NULL,
+        total_fara_tva REAL NOT NULL,
+        archive_dir TEXT NOT NULL,
+        exported_at TEXT NOT NULL
+    );
 """
 
 
@@ -44,23 +52,32 @@ class PartStatus(Enum):
 
 @dataclass(frozen=True)
 class CodeSuggestion:
-    """An existing code that might be what the incoming code really refers to."""
-    code: str     # the code exactly as stored (i.e. as it exists in WinMentor)
-    name: str     # its canonical name
-    reason: str   # why it was suggested (see _suggest)
-    score: float  # heuristic ranking value, NOT a probability
+    code: str
+    name: str
+    reason: str
+    score: float
 
 
 @dataclass(frozen=True)
 class PartResolution:
     status: PartStatus
-    code: str          # code to export: the stored code if found, else the compact form of the incoming one
-    name: str          # canonical name if found, else the quote's name
-    matched_via: str   # "exact", "separators" (matched ignoring spaces/dashes) or "none"
-    suggestions: list[CodeSuggestion] = field(default_factory=list[CodeSuggestion])  # only filled for NEW
+    code: str
+    name: str
+    matched_via: str
+    suggestions: list[CodeSuggestion] = field(default_factory=list[CodeSuggestion])
 
 
-# --- Normalization -----------------------------------------------------------------------
+@dataclass(frozen=True)
+class ExportLogEntry:
+    doc_key: str
+    supplier_name: str
+    document_code: str
+    winmentor_doc_nr: str
+    quote_date: str
+    total_fara_tva: float
+    archive_dir: str
+    exported_at: str
+
 
 def strip_supplier_suffix(code: str) -> str:
     """Strips multi-column supplier suffixes separated by ' - ' (e.g. Materom's
@@ -135,7 +152,7 @@ def names_match(quote_name: str, canonical_name: str, threshold: float = NAME_SI
     for x, y in _OPPOSITES:
         if (x in a and y in b and y not in a and x not in b) or (y in a and x in b and x not in a and y not in b):
             return False
-    if a <= b or b <= a:  # e.g. short WinMentor label vs. longer supplier description
+    if a <= b or b <= a:
         return True
     return len(a & b) / len(a | b) >= threshold
 
@@ -151,10 +168,10 @@ def _connect(db_path: str) -> Generator[sqlite3.Connection, None, None]:
     """
     conn = sqlite3.connect(db_path, timeout=10)
     try:
-        with conn:  # commit / rollback
-            conn.execute(_SCHEMA)  # idempotent, so a missing init_db() can't break lookups
+        with conn:
+            conn.executescript(_SCHEMA)
             columns = {cast(str, row[1]) for row in conn.execute("PRAGMA table_info(parts)")}
-            if "last_used" not in columns:  # databases created before last_used existed
+            if "last_used" not in columns:
                 conn.execute("ALTER TABLE parts ADD COLUMN last_used TEXT")
             yield conn
     finally:
@@ -267,7 +284,7 @@ def resolve_parts(
             results.append(judge(same[0][0], same[0][1], quote_name, "separators"))
             continue
         results.append(
-            PartResolution(PartStatus.NEW, key or norm, quote_name, "none", _suggest(rows, code, max_suggestions))
+            PartResolution(PartStatus.NEW, norm or key, quote_name, "none", _suggest(rows, code, max_suggestions))
         )
     return results
 
@@ -358,26 +375,103 @@ def update_or_add_part(part_code: str, part_name: str, db_path: str = DEFAULT_DB
     upsert_parts([(part_code, part_name)], db_path)
 
 
-def normalize_existing_codes(db_path: str = DEFAULT_DB_PATH) -> int:
-    """
-    One-time migration for a database filled before codes were normalized.
-    Re-keys every row to its normalized code (existing spaces/dashes are kept; only
-    whitespace and case are normalized). If two old codes collapse to the same
-    normalized code, one is kept (arbitrarily) and the rest dropped. Returns the number
-    of rows dropped, so you can review them.
-    """
+# --- Duplicate Invoice Protection & Export Tracking --------------------------------------
+
+def _make_doc_key(supplier_name: str, document_code: str) -> str:
+    sup = compact_code(supplier_name)[:12]
+    doc = compact_code(document_code)
+    return f"{sup}:{doc}"
+
+
+def check_duplicate_invoice(
+    supplier_name: str, document_code: str, db_path: str = DEFAULT_DB_PATH
+) -> ExportLogEntry | None:
+    """Returns the previous ExportLogEntry if this supplier + document was already exported."""
+    key = _make_doc_key(supplier_name, document_code)
+    with _connect(db_path) as conn:
+        row = cast(
+            tuple[str, str, str, str, str, float, str, str] | None,
+            conn.execute(
+                """
+                SELECT doc_key, supplier_name, document_code, winmentor_doc_nr,
+                       quote_date, total_fara_tva, archive_dir, exported_at
+                FROM exports_log WHERE doc_key = ?
+                """,
+                (key,),
+            ).fetchone(),
+        )
+    if row is None:
+        return None
+    return ExportLogEntry(*row)
+
+
+def record_export(
+    supplier_name: str,
+    document_code: str,
+    winmentor_doc_nr: str,
+    quote_date: str,
+    total_fara_tva: float,
+    archive_dir: str,
+    db_path: str = DEFAULT_DB_PATH,
+) -> ExportLogEntry:
+    """Records an exported invoice in exports_log."""
+    key = _make_doc_key(supplier_name, document_code)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    entry = ExportLogEntry(
+        doc_key=key,
+        supplier_name=supplier_name.strip(),
+        document_code=document_code.strip(),
+        winmentor_doc_nr=winmentor_doc_nr,
+        quote_date=quote_date,
+        total_fara_tva=round(total_fara_tva, 2),
+        archive_dir=archive_dir,
+        exported_at=now,
+    )
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO exports_log (
+                doc_key, supplier_name, document_code, winmentor_doc_nr,
+                quote_date, total_fara_tva, archive_dir, exported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(doc_key) DO UPDATE SET
+                winmentor_doc_nr = excluded.winmentor_doc_nr,
+                quote_date = excluded.quote_date,
+                total_fara_tva = excluded.total_fara_tva,
+                archive_dir = excluded.archive_dir,
+                exported_at = excluded.exported_at
+            """,
+            (
+                entry.doc_key,
+                entry.supplier_name,
+                entry.document_code,
+                entry.winmentor_doc_nr,
+                entry.quote_date,
+                entry.total_fara_tva,
+                entry.archive_dir,
+                entry.exported_at,
+            ),
+        )
+    return entry
+
+
+def list_export_history(limit: int = 50, db_path: str = DEFAULT_DB_PATH) -> list[ExportLogEntry]:
+    """Lists recent exports so the operator can re-trigger any archived invoice with one click."""
     with _connect(db_path) as conn:
         rows = cast(
-            list[tuple[str, str, str | None]],
-            conn.execute("SELECT part_code, part_name, last_used FROM parts").fetchall(),
+            list[tuple[str, str, str, str, str, float, str, str]],
+            conn.execute(
+                """
+                SELECT doc_key, supplier_name, document_code, winmentor_doc_nr,
+                       quote_date, total_fara_tva, archive_dir, exported_at
+                FROM exports_log
+                ORDER BY exported_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall(),
         )
-        conn.execute("DELETE FROM parts")
-        conn.executemany(
-            "INSERT OR IGNORE INTO parts (part_code, part_name, last_used) VALUES (?, ?, ?)",
-            [(normalize_code(c), n, u) for c, n, u in rows if normalize_code(c)],
-        )
-        after = cast(tuple[int], conn.execute("SELECT COUNT(*) FROM parts").fetchone())[0]
-    return len(rows) - after
+    return [ExportLogEntry(*r) for r in rows]
 
 
 if __name__ == "__main__":
