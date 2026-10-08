@@ -31,18 +31,26 @@ from nomenclature import (
     DEFAULT_DB_PATH,
     ExportLogEntry,
     check_duplicate_invoice,
+    delete_part,
     init_db,
+    list_all_parts,
     list_export_history,
+    list_model_stats,
     resolve_parts,
     search_codes,
+    update_or_add_part,
 )
 from seed_nomenclature import seed_from_winmentor_excel
-from talon_scanner import TalonCropConfig, build_local_scan_preview
+from talon_scanner import (
+    TalonCropConfig,
+    build_local_scan_preview,
+    render_document_pages,
+)
 
 DB_PATH: str = DEFAULT_DB_PATH
 EXPORT_DIR: str = DEFAULT_EXPORT_DIR
 
-app = FastAPI(title="FacturiGUI WinMentor Bridge", version="1.0.0")
+app = FastAPI(title="FacturiGUI WinMentor Bridge", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -67,6 +75,7 @@ class SuggestionOut(BaseModel):
     name: str
     reason: str
     score: float
+    stoc: float = 0.0
 
 
 class EnrichedPartOut(BaseModel):
@@ -79,6 +88,8 @@ class EnrichedPartOut(BaseModel):
     resolved_code: str
     canonical_name: str
     matched_via: str
+    stoc: float
+    sold: float
     suggestions: list[SuggestionOut]
 
 
@@ -101,10 +112,12 @@ class QuoteUploadResponse(BaseModel):
     duplicate_warning: ExportLogOut | None
     validation_issues: list[str]
     parts: list[EnrichedPartOut]
+    preview_pages: list[str]
 
 
 class TalonPreviewResponse(BaseModel):
     warped_data_url: str
+    scanned_full_data_url: str
     scanned_crop_data_url: str
     x1: float
     y1: float
@@ -112,7 +125,10 @@ class TalonPreviewResponse(BaseModel):
     y2: float
     rotate_deg: int
     redact_owner_c: bool
+    c_y1: float
+    c_y2: float
     detected_quad: bool
+    detected_c_section: bool
 
 
 class VehicleUploadResponse(BaseModel):
@@ -128,11 +144,43 @@ class SeedExcelResponse(BaseModel):
     db_path: str
 
 
+class PartRecordOut(BaseModel):
+    nr_crt: int
+    part_code: str
+    part_name: str
+    stoc: float
+    sold: float
+    last_used: str | None
+
+
+class StockListResponse(BaseModel):
+    total_count: int
+    total_sold_ron: float
+    items: list[PartRecordOut]
+
+
+class UpsertPartIn(BaseModel):
+    part_code: str
+    part_name: str
+
+
+class ModelStatOut(BaseModel):
+    model_name: str
+    success_count: int
+    rate_limit_429_count: int
+    unavailable_503_count: int
+    other_error_count: int
+    avg_latency_ms: float
+    in_cooldown: bool
+    cooldown_remaining_s: int
+    last_used: str | None
+
+
 class VehicleTargetIn(BaseModel):
     numar_inmatriculare: str
     serie_sasiu: str = ""
     marca_model: str = ""
-    departament: Department = Department.TINICHIGERIE
+    departament: str = ""
 
 
 class AllocationIn(BaseModel):
@@ -142,6 +190,7 @@ class AllocationIn(BaseModel):
     unit_price: float
     um: str = DEFAULT_UM
     vehicle: VehicleTargetIn | None = None
+    departament: Department | None = None
 
 
 class ExportRequestIn(BaseModel):
@@ -218,6 +267,7 @@ def health_check() -> HealthResponse:
 def upload_quote(file: UploadFile = File(...)) -> QuoteUploadResponse:
     temp_path = _save_upload_to_temp(file, default_ext=".pdf")
     try:
+        preview_pages = render_document_pages(temp_path, max_pages=6)
         quote = extract_quote_data(temp_path)
         issues = validate_quote(quote)
         resolutions = resolve_parts(
@@ -243,12 +293,15 @@ def upload_quote(file: UploadFile = File(...)) -> QuoteUploadResponse:
                     resolved_code=res.code,
                     canonical_name=res.name,
                     matched_via=res.matched_via,
+                    stoc=res.stoc,
+                    sold=res.sold,
                     suggestions=[
                         SuggestionOut(
                             code=s.code,
                             name=s.name,
                             reason=s.reason,
                             score=s.score,
+                            stoc=s.stoc,
                         )
                         for s in res.suggestions
                     ],
@@ -263,6 +316,7 @@ def upload_quote(file: UploadFile = File(...)) -> QuoteUploadResponse:
             duplicate_warning=_to_log_out(dup_entry) if dup_entry else None,
             validation_issues=issues,
             parts=enriched,
+            preview_pages=preview_pages,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -274,35 +328,13 @@ def upload_quote(file: UploadFile = File(...)) -> QuoteUploadResponse:
 @app.post("/api/preprocess-vehicle-preview", response_model=TalonPreviewResponse)
 def preprocess_vehicle_preview(
     file: UploadFile = File(...),
-    x1: float | None = Form(default=None),
-    y1: float | None = Form(default=None),
-    x2: float | None = Form(default=None),
-    y2: float | None = Form(default=None),
-    rotate_deg: int = Form(default=0),
-    redact_owner_c: bool = Form(default=False),
 ) -> TalonPreviewResponse:
-    """
-    100% LOCAL endpoint (zero Google calls):
-    Perspective-flattens a distant Talon photo, crops only the Top-Left A-to-K area,
-    applies the scanned-document filter, and returns Base64 images for operator confirmation.
-    """
     temp_path = _save_upload_to_temp(file, default_ext=".jpg")
     try:
-        custom_crop = (
-            TalonCropConfig(
-                x1=x1,
-                y1=y1,
-                x2=x2,
-                y2=y2,
-                rotate_deg=rotate_deg,
-                redact_owner_c=redact_owner_c,
-            )
-            if (x1 is not None and y1 is not None and x2 is not None and y2 is not None)
-            else None
-        )
-        prev = build_local_scan_preview(temp_path, custom_crop=custom_crop)
+        prev = build_local_scan_preview(temp_path, custom_crop=None)
         return TalonPreviewResponse(
             warped_data_url=prev.warped_data_url,
+            scanned_full_data_url=prev.scanned_full_data_url,
             scanned_crop_data_url=prev.scanned_crop_data_url,
             x1=prev.suggested_crop.x1,
             y1=prev.suggested_crop.y1,
@@ -310,7 +342,10 @@ def preprocess_vehicle_preview(
             y2=prev.suggested_crop.y2,
             rotate_deg=prev.suggested_crop.rotate_deg,
             redact_owner_c=prev.suggested_crop.redact_owner_c,
+            c_y1=prev.suggested_crop.c_y1,
+            c_y2=prev.suggested_crop.c_y2,
             detected_quad=prev.detected_quad,
+            detected_c_section=prev.detected_c_section,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -328,12 +363,10 @@ def upload_vehicle(
     y2: float | None = Form(default=None),
     rotate_deg: int = Form(default=0),
     redact_owner_c: bool = Form(default=False),
+    c_y1: float = Form(default=0.22),
+    c_y2: float = Form(default=0.36),
 ) -> VehicleUploadResponse:
-    """
-    Crops and scan-enhances ONLY the Top-Left A-to-K region locally, then uploads
-    only that cropped PNG patch to Gemini OCR.
-    """
-    temp_path = _save_upload_to_temp(file, default_ext=".pdf")
+    temp_path = _save_upload_to_temp(file, default_ext=".png")
     try:
         custom_crop = (
             TalonCropConfig(
@@ -343,6 +376,8 @@ def upload_vehicle(
                 y2=y2,
                 rotate_deg=rotate_deg,
                 redact_owner_c=redact_owner_c,
+                c_y1=c_y1,
+                c_y2=c_y2,
             )
             if (x1 is not None and y1 is not None and x2 is not None and y2 is not None)
             else None
@@ -370,14 +405,62 @@ def upload_vehicle(
 
 @app.get("/api/nomenclature/search", response_model=list[SuggestionOut])
 def search_nomenclature(
-    q: str = Query(..., min_length=2, description="Code or part name query"),
-    limit: int = Query(default=10, ge=1, le=50),
+    q: str = Query(..., min_length=1, description="Code or part name query"),
+    limit: int = Query(default=12, ge=1, le=50),
 ) -> list[SuggestionOut]:
     hits = search_codes(q, limit=limit, db_path=DB_PATH)
     return [
-        SuggestionOut(code=h.code, name=h.name, reason=h.reason, score=h.score)
+        SuggestionOut(
+            code=h.code, name=h.name, reason=h.reason, score=h.score, stoc=h.stoc
+        )
         for h in hits
     ]
+
+
+@app.get("/api/nomenclature/list", response_model=StockListResponse)
+def get_nomenclature_stock_list(
+    search: str = Query(default=""),
+    only_in_stock: bool = Query(default=False),
+    limit: int = Query(default=150, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> StockListResponse:
+    total, total_sold, records = list_all_parts(
+        search=search,
+        only_in_stock=only_in_stock,
+        limit=limit,
+        offset=offset,
+        db_path=DB_PATH,
+    )
+    return StockListResponse(
+        total_count=total,
+        total_sold_ron=total_sold,
+        items=[
+            PartRecordOut(
+                nr_crt=r.nr_crt,
+                part_code=r.part_code,
+                part_name=r.part_name,
+                stoc=r.stoc,
+                sold=r.sold,
+                last_used=r.last_used,
+            )
+            for r in records
+        ],
+    )
+
+
+@app.post("/api/nomenclature/upsert")
+def upsert_nomenclature_part(req: UpsertPartIn) -> dict[str, str]:
+    try:
+        update_or_add_part(req.part_code, req.part_name, db_path=DB_PATH)
+        return {"status": "ok"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.delete("/api/nomenclature/{part_code}")
+def remove_nomenclature_part(part_code: str) -> dict[str, bool]:
+    deleted = delete_part(part_code, db_path=DB_PATH)
+    return {"deleted": deleted}
 
 
 @app.post("/api/nomenclature/seed-excel", response_model=SeedExcelResponse)
@@ -391,6 +474,25 @@ def seed_nomenclature_excel(file: UploadFile = File(...)) -> SeedExcelResponse:
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+@app.get("/api/models/stats", response_model=list[ModelStatOut])
+def get_gemini_model_stats() -> list[ModelStatOut]:
+    stats = list_model_stats(db_path=DB_PATH)
+    return [
+        ModelStatOut(
+            model_name=s.model_name,
+            success_count=s.success_count,
+            rate_limit_429_count=s.rate_limit_429_count,
+            unavailable_503_count=s.unavailable_503_count,
+            other_error_count=s.other_error_count,
+            avg_latency_ms=s.avg_latency_ms,
+            in_cooldown=s.in_cooldown,
+            cooldown_remaining_s=s.cooldown_remaining_s,
+            last_used=s.last_used,
+        )
+        for s in stats
+    ]
 
 
 @app.post("/api/export", response_model=ExportResponseOut)
@@ -413,6 +515,7 @@ def export_invoice(req: ExportRequestIn) -> ExportResponseOut:
                     if a.vehicle is not None
                     else None
                 ),
+                departament=a.departament,
             )
             for a in req.allocations
         ]

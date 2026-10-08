@@ -16,21 +16,25 @@ from nomenclature import (
     upsert_parts,
 )
 
+# Default directory where WinMentor export bundles and flat files are written
 DEFAULT_EXPORT_DIR = str(
     Path(os.environ.get("WINMENTOR_EXPORT_DIR", Path(__file__).with_name("exports")))
 )
 
+# Standard accounting defaults for Top Speed Service S.R.L.
 DEFAULT_TVA_PERCENT = 21
 DEFAULT_GESTIUNE = "MAGAZIE"
 DEFAULT_UM = "Buc"
 
 
 class Department(str, Enum):
+    """Valid workshop departments for general consumable allocations."""
     TINICHIGERIE = "TINICHIGERIE"
     VOPSITORIE = "VOPSITORIE"
     MECANICA = "MECANICA"
 
 
+# Known supplier CIFs for automatic header population
 KNOWN_SUPPLIER_CIFS: dict[str, str] = {
     "MATEROM": "RO12456540",
     "AUTONET": "RO8539532",
@@ -44,18 +48,25 @@ KNOWN_SUPPLIER_CIFS: dict[str, str] = {
 
 @dataclass(frozen=True)
 class VehicleTarget:
-    """Identifies the car and workshop department receiving a consumed part."""
+    """
+    Represents a specific vehicle for a Consumption Voucher (Bon de Consum).
+    Note: `departament` is kept optional with a blank default only so legacy tests
+    (test_exporter.py) continue to pass without tying cars to departments in the UI.
+    """
     numar_inmatriculare: str
     serie_sasiu: str = ""
     marca_model: str = ""
-    departament: Department = Department.TINICHIGERIE
+    departament: Department | str = ""
 
 
 @dataclass(frozen=True)
 class ExportAllocation:
     """
-    A resolved line item (or split portion of a line item) ready for export.
-    If `vehicle` is None, the quantity stays in MAGAZIE and is NOT added to Bon consum.
+    A single part allocation from a staged supplier quote.
+    Mutually exclusive 3-way destination:
+      1. `vehicle` is set     -> Consumed on that specific car (Bon consum with 4.Obs = '<make/model> <plate>').
+      2. `departament` is set -> General shop consumable for that department (Bon consum with CineConsuma = dept).
+      3. Both are None        -> Stays in MAGAZIE general stock (Factura fiscala only, no Bon consum).
     """
     part_code: str
     part_name: str
@@ -63,13 +74,14 @@ class ExportAllocation:
     unit_price: float
     um: str = DEFAULT_UM
     vehicle: VehicleTarget | None = None
+    departament: Department | None = None
 
 
 @dataclass(frozen=True)
 class ExportInvoicePayload:
     supplier_name: str
     document_code: str
-    quote_date: str  # YYYY-MM-DD
+    quote_date: str  # ISO format: YYYY-MM-DD
     allocations: list[ExportAllocation] = field(default_factory=list[ExportAllocation])
     supplier_cif: str | None = None
     tva_percent: int = DEFAULT_TVA_PERCENT
@@ -89,9 +101,10 @@ class ExportResult:
     nomenclature_updated: int
 
 
-# --- Formatting Helpers ------------------------------------------------------------------
+# --- Formatting & WinMentor Convention Helpers -------------------------------------------
 
 def _ascii_clean(text: str) -> str:
+    """Strips Romanian diacritics and semicolons/newlines for clean WinMentor text output."""
     decomposed = unicodedata.normalize("NFKD", text)
     stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
     cleaned = stripped.replace(";", ",").replace("\r", " ").replace("\n", " ")
@@ -99,37 +112,41 @@ def _ascii_clean(text: str) -> str:
 
 
 def _to_winmentor_date(iso_date: str) -> str:
+    """Converts YYYY-MM-DD into WinMentor's DD.MM.YYYY format."""
     dt = datetime.strptime(iso_date.strip(), "%Y-%m-%d")
     return dt.strftime("%d.%m.%Y")
 
 
 def extract_winmentor_doc_number(doc_code: str) -> str:
     """
-    Extracts only the trailing numeric invoice number as entered in WinMentor (Rule 2.2):
-    - 'IN26 000001380' -> '1380'
-    - 'FB2AX10394098'  -> '394098'
-    - '22608977520'    -> '977520'
-    - 'ARD-F219034'    -> '219034'
-    - 'MSA 3241'       -> '3241'
+    Rule 2.2 + Point 7: Extracts the trailing numeric invoice number for WinMentor's `Numar` field.
+    - Strips series prefixes (e.g., 'FB2AX10394623' -> '394623').
+    - Preserves leading zeros on 1-to-6 digit invoice numbers (e.g., '078561' -> '078561', '01234' -> '01234').
+    - Only strips excess zero padding when a raw number is >6 digits starting with '00' (e.g., Sprint '000001380' -> '1380').
     """
     cleaned = _ascii_clean(doc_code).upper()
+    if re.fullmatch(r"\d{1,7}", cleaned):
+        return cleaned
     digits_groups: list[str] = re.findall(r"\d+", cleaned)
     if not digits_groups:
         return cleaned
     last_digits = digits_groups[-1]
+    if len(last_digits) > 6 and last_digits.startswith("00"):
+        return last_digits.lstrip("0") or "0"
     if len(last_digits) > 6:
-        last_digits = last_digits[-6:]
-    stripped = last_digits.lstrip("0")
-    return stripped or "0"
+        return last_digits[-6:]
+    return last_digits
 
 
 def format_bon_obs(vehicle: VehicleTarget) -> str:
     """
-    Formats the 4.Obs field on Bon consum to match 'opel corsa ct61mlg':
-    lowercase '<marca_model> <compact_plate>'.
+    Formats the vehicle identifier for the `4.Obs` field on WinMentor's `Bon consum`:
+    '<make/model> <plate_without_hyphens>' in lowercase (e.g., 'opel corsa ct61mlg').
     """
     plate_compact = re.sub(r"[^a-z0-9]", "", _ascii_clean(vehicle.numar_inmatriculare).lower())
     model_clean = _ascii_clean(vehicle.marca_model).lower()
+    if not plate_compact:
+        return model_clean
     if model_clean:
         return f"{model_clean} {plate_compact}".strip()
     return plate_compact
@@ -145,7 +162,7 @@ def _resolve_supplier_cif(supplier_name: str, explicit_cif: str | None) -> str:
     return ""
 
 
-# --- Generators --------------------------------------------------------------------------
+# --- Invoice Line Aggregation (Recombines Split Rows on Factura Intrare) -----------------
 
 @dataclass
 class _AggregatedInvoiceLine:
@@ -161,6 +178,11 @@ class _AggregatedInvoiceLine:
 def _aggregate_invoice_lines(
     allocations: list[ExportAllocation], tva_percent: int
 ) -> list[_AggregatedInvoiceLine]:
+    """
+    Recombines split allocations of the same part on the supplier invoice (NIR) so
+    the supplier invoice line matches the physical PDF invoice, even if the part's
+    quantity was split across a car, a department, and MAGAZIE stock.
+    """
     grouped: dict[tuple[str, float], _AggregatedInvoiceLine] = {}
     for a in allocations:
         code = normalize_code(a.part_code)
@@ -191,7 +213,11 @@ def _aggregate_invoice_lines(
     return list(grouped.values())
 
 
-def build_fact_int_content(payload: ExportInvoicePayload) -> tuple[str, list[_AggregatedInvoiceLine]]:
+# --- Content Builders (FACT_INT.TXT & BON_CONS.TXT) --------------------------------------
+
+def build_fact_int_content(
+    payload: ExportInvoicePayload,
+) -> tuple[str, list[_AggregatedInvoiceLine]]:
     wm_date = _to_winmentor_date(payload.quote_date)
     dt = datetime.strptime(payload.quote_date.strip(), "%Y-%m-%d")
     numar = extract_winmentor_doc_number(payload.document_code)
@@ -233,16 +259,31 @@ def build_fact_int_content(payload: ExportInvoicePayload) -> tuple[str, list[_Ag
     return "\r\n".join(lines) + "\r\n", inv_lines
 
 
-def build_bon_cons_content(payload: ExportInvoicePayload) -> tuple[str | None, list[dict[str, object]]]:
-    """Groups vehicle-assigned allocations by (departament, obs_label) and builds BON_CONS.TXT."""
-    by_car: dict[tuple[str, str], list[ExportAllocation]] = {}
+def build_bon_cons_content(
+    payload: ExportInvoicePayload,
+) -> tuple[str | None, list[dict[str, object]]]:
+    """
+    Groups non-stock allocations into Consumption Vouchers (`Bon consum`):
+    - If `a.vehicle` is set: grouped by that specific car (`Observatii` = 'opel corsa ct61mlg').
+    - Else if `a.departament` is set: grouped by that department (`CineConsuma` = 'TINICHIGERIE', `Observatii` = '').
+    - Else: item stays in `MAGAZIE` (ignored here).
+    """
+    by_target: dict[tuple[str, str], list[ExportAllocation]] = {}
     for a in payload.allocations:
         if a.vehicle is not None and a.vehicle.numar_inmatriculare.strip():
-            dept = a.vehicle.departament.value
+            raw_dept = (
+                a.vehicle.departament.value
+                if isinstance(a.vehicle.departament, Department)
+                else str(a.vehicle.departament)
+            )
+            dept = _ascii_clean(raw_dept).upper()
             obs = format_bon_obs(a.vehicle)
-            by_car.setdefault((dept, obs), []).append(a)
+            by_target.setdefault((dept, obs), []).append(a)
+        elif a.departament is not None:
+            dept = _ascii_clean(a.departament.value).upper()
+            by_target.setdefault((dept, ""), []).append(a)
 
-    if not by_car:
+    if not by_target:
         return None, []
 
     wm_date = _to_winmentor_date(payload.quote_date)
@@ -255,12 +296,12 @@ def build_bon_cons_content(payload: ExportInvoicePayload) -> tuple[str | None, l
         f"AnLucru={dt.year}",
         f"LunaLucru={dt.month:02d}",
         "TipDocument=BON DE CONSUM",
-        f"TotalBonuri={len(by_car)}",
+        f"TotalBonuri={len(by_target)}",
     ]
 
     vouchers_meta: list[dict[str, object]] = []
 
-    for bon_idx, ((dept, obs), car_items) in enumerate(by_car.items(), start=1):
+    for bon_idx, ((dept, obs), items_for_target) in enumerate(by_target.items(), start=1):
         lines.extend(
             [
                 "",
@@ -276,7 +317,7 @@ def build_bon_cons_content(payload: ExportInvoicePayload) -> tuple[str | None, l
             ]
         )
         voucher_items: list[dict[str, object]] = []
-        for item_idx, item in enumerate(car_items, start=1):
+        for item_idx, item in enumerate(items_for_target, start=1):
             code = normalize_code(item.part_code)
             name = _ascii_clean(item.part_name).upper()
             um = _ascii_clean(item.um) or DEFAULT_UM
@@ -303,7 +344,9 @@ def build_bon_cons_content(payload: ExportInvoicePayload) -> tuple[str | None, l
                 "gestiune": gestiune,
                 "cine_consuma": dept,
                 "observatii": obs,
-                "total_valoare": round(sum( round(i.quantity * i.unit_price, 2) for i in car_items ), 2),
+                "total_valoare": round(
+                    sum(round(i.quantity * i.unit_price, 2) for i in items_for_target), 2
+                ),
                 "items": voucher_items,
             }
         )
@@ -311,7 +354,7 @@ def build_bon_cons_content(payload: ExportInvoicePayload) -> tuple[str | None, l
     return "\r\n".join(lines) + "\r\n", vouchers_meta
 
 
-# --- Main Export & Archive Entrypoints ---------------------------------------------------
+# --- Main Exporter & Archiver ------------------------------------------------------------
 
 def export_to_winmentor(
     payload: ExportInvoicePayload,
@@ -319,16 +362,19 @@ def export_to_winmentor(
     db_path: str = DEFAULT_DB_PATH,
 ) -> ExportResult:
     """
-    1. Checks for duplicate invoice in nomenclature.db (unless allow_duplicate=True).
-    2. Updates nomenclature.db with approved part names.
-    3. Archives export_bundle.json, FACT_INT.TXT, and BON_CONS.TXT into exports/archive/YYYY-MM/<folder>/.
-    4. Copies active files to the root export_dir for immediate use / auto-typing.
+    1. Blocks duplicate supplier invoices (unless `allow_duplicate=True`).
+    2. Atomically upserts all reconciled part codes and names into `nomenclature.db`.
+    3. Writes `export_bundle.json`, `FACT_INT.TXT`, and `BON_CONS.TXT` into a permanent
+       monthly archive subfolder (`exports/archive/YYYY-MM/<timestamp>_<supplier>_<doc_nr>/`)
+       as well as the active `exports/` root directory.
     """
     if not payload.allocations:
         raise ValueError("Cannot export an invoice with zero part allocations.")
 
     if not payload.allow_duplicate:
-        existing = check_duplicate_invoice(payload.supplier_name, payload.document_code, db_path=db_path)
+        existing = check_duplicate_invoice(
+            payload.supplier_name, payload.document_code, db_path=db_path
+        )
         if existing is not None:
             raise ValueError(
                 f"Duplicate invoice blocked: {payload.supplier_name} '{payload.document_code}' "
@@ -343,16 +389,20 @@ def export_to_winmentor(
             raise ValueError(f"Invalid empty part_code or part_name in allocation: {a!r}")
         unique_parts[code] = name
 
-    upsert_parts(list(unique_parts.items()), db_path=db_path)
+    upsert_parts(list(unique_parts.items()), db_path=db_path, update_stock_values=False)
 
     dt = datetime.strptime(payload.quote_date.strip(), "%Y-%m-%d")
     month_folder = dt.strftime("%Y-%m")
     wm_doc_nr = extract_winmentor_doc_number(payload.document_code)
-    sup_slug = re.sub(r"[^A-Z0-9]+", "_", _ascii_clean(payload.supplier_name).upper()).strip("_")[:16]
+    sup_slug = re.sub(
+        r"[^A-Z0-9]+", "_", _ascii_clean(payload.supplier_name).upper()
+    ).strip("_")[:16]
     timestamp_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     root_dir = Path(export_dir)
-    archive_dir = root_dir / "archive" / month_folder / f"{timestamp_slug}_{sup_slug}_{wm_doc_nr}"
+    archive_dir = (
+        root_dir / "archive" / month_folder / f"{timestamp_slug}_{sup_slug}_{wm_doc_nr}"
+    )
     archive_dir.mkdir(parents=True, exist_ok=True)
 
     fact_content, inv_lines = build_fact_int_content(payload)
@@ -364,7 +414,9 @@ def export_to_winmentor(
     bundle_data: dict[str, object] = {
         "factura_intrare": {
             "furnizor": _ascii_clean(payload.supplier_name).upper(),
-            "cod_furnizor": _resolve_supplier_cif(payload.supplier_name, payload.supplier_cif),
+            "cod_furnizor": _resolve_supplier_cif(
+                payload.supplier_name, payload.supplier_cif
+            ),
             "document_code_raw": payload.document_code,
             "numar_doc_winmentor": wm_doc_nr,
             "data_winmentor": _to_winmentor_date(payload.quote_date),
@@ -425,8 +477,10 @@ def export_to_winmentor(
     )
 
 
-def retrigger_archived_export(archive_dir: str, export_dir: str = DEFAULT_EXPORT_DIR) -> dict[str, str | None]:
-    """Copies an archived export back into the active export_dir with one click."""
+def retrigger_archived_export(
+    archive_dir: str, export_dir: str = DEFAULT_EXPORT_DIR
+) -> dict[str, str | None]:
+    """Copies an archived export bundle back into the root `exports/` directory."""
     src = Path(archive_dir)
     if not src.exists():
         raise FileNotFoundError(f"Archive folder not found: {archive_dir}")

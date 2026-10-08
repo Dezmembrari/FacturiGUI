@@ -71,6 +71,13 @@ body,
   align-items: start;
 }
 
+/* Document Zoom & Pan Split Viewer Layout */
+.workspace-with-viewer {
+  grid-template-columns: 280px minmax(0, 1fr) 390px;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+}
+
 .panel {
   background: #ffffff;
   border: 1px solid #cbd5e1;
@@ -252,7 +259,7 @@ select {
   cursor: pointer;
 }
 
-/* Bulk Quote Queue Bar */
+/* Bulk Quote Queue Bar & Red/Yellow Duplicate Pills */
 .queue-bar {
   background: #f8fafc;
   border: 1px solid #cbd5e1;
@@ -263,11 +270,46 @@ select {
   gap: 0.45rem;
 }
 
+.queue-bar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
 .queue-title {
   font-size: 0.78rem;
   font-weight: 700;
   color: #334155;
   text-transform: uppercase;
+}
+
+.queue-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #475569;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  margin-right: -0.35rem;
+}
+
+.legend-red {
+  background: #fee2e2;
+  border: 1px solid #dc2626;
+}
+
+.legend-yellow {
+  background: #fef3c7;
+  border: 1px solid #d97706;
 }
 
 .queue-pills {
@@ -291,8 +333,29 @@ select {
 
 .pill-active {
   border-color: #2563eb;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
   font-weight: 600;
+}
+
+/* Yellow Pill: Duplicated inside the current queue */
+.pill-queue-duplicate {
+  background: #fef3c7 !important;
+  border-color: #f59e0b !important;
+  color: #92400e !important;
+  font-weight: 600;
+}
+
+/* Red Pill: Already exported in DB memory */
+.pill-db-duplicate {
+  background: #fee2e2 !important;
+  border-color: #ef4444 !important;
+  color: #991b1b !important;
+  font-weight: 600;
+}
+
+.pill-queue-duplicate.pill-active,
+.pill-db-duplicate.pill-active {
+  box-shadow: 0 0 0 2px #0f172a !important;
 }
 
 .pill-exported {
@@ -333,6 +396,18 @@ select {
   padding: 0.75rem;
   border-radius: 6px;
   border: 1px solid #e2e8f0;
+}
+
+/* Responsive 5-Field Invoice Header (Wraps cleanly when Preview Viewer is open) */
+.invoice-meta-grid-5 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 0.55rem;
+  background: #f8fafc;
+  padding: 0.65rem;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  align-items: end;
 }
 
 .field {
@@ -385,6 +460,82 @@ select {
   text-transform: uppercase;
   color: #475569;
   white-space: nowrap;
+}
+
+/* Fit-to-Screen Parts Table & Balanced Auto-Growing Rows */
+.parts-table-fit {
+  table-layout: fixed;
+  width: 100%;
+  min-width: 740px;
+  border-collapse: collapse;
+}
+
+.parts-table-fit th,
+.parts-table-fit td {
+  padding: 0.4rem 0.3rem;
+  vertical-align: middle;
+  overflow-wrap: break-word;
+}
+
+.parts-table-fit th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.parts-table-fit .input-code,
+.parts-table-fit .input-um,
+.parts-table-fit .input-num,
+.parts-table-fit .input-target {
+  width: 100% !important;
+  min-width: 0 !important;
+  min-height: 34px;
+  padding: 0.32rem 0.35rem;
+  font-size: 0.8rem;
+  border-radius: 5px;
+}
+
+/* Pure-CSS Auto-Growing Textarea (Wraps by word, never single letters, zero resize handle) */
+.autogrow-name {
+  display: grid;
+  width: 100%;
+  min-width: 140px;
+}
+
+.autogrow-name::after {
+  content: attr(data-replicated-value) " ";
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.autogrow-name > .input-name-locked,
+.autogrow-name::after {
+  grid-area: 1 / 1 / 2 / 2;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0.38rem 0.48rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  font-family: inherit;
+  font-size: 0.81rem;
+  line-height: 1.32;
+  color: #0f172a;
+  background: #ffffff;
+  box-sizing: border-box;
+}
+
+.autogrow-name > .input-name-locked {
+  resize: none;
+  overflow: hidden;
+}
+
+.autogrow-name > .input-name-locked:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
 }
 
 .empty-cell {
@@ -464,13 +615,22 @@ select {
   cursor: pointer;
 }
 
-.search-popover {
-  margin-top: 0.35rem;
-  background: #fff;
-  border: 1px solid #94a3b8;
-  border-radius: 6px;
-  padding: 0.4rem;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+/* Floating Overlay Search Dropdown (Never stretches table row height) */
+.code-cell {
+  position: relative;
+}
+
+.search-floating-popover {
+  position: absolute;
+  top: 2.3rem;
+  left: 0;
+  width: 420px;
+  background: #ffffff;
+  border: 1px solid #64748b;
+  border-radius: 8px;
+  padding: 0.5rem;
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.22);
+  z-index: 100;
 }
 
 .search-bar {
@@ -479,8 +639,17 @@ select {
   margin-bottom: 0.3rem;
 }
 
+.search-results-scroll {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
 .search-hit {
-  padding: 0.3rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.38rem 0.45rem;
   cursor: pointer;
   border-bottom: 1px solid #f1f5f9;
   font-size: 0.78rem;
@@ -488,6 +657,12 @@ select {
 
 .search-hit:hover {
   background: #f1f5f9;
+}
+
+.search-hit-main {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .invoice-footer {
@@ -546,10 +721,22 @@ select {
   font-size: 0.82rem;
 }
 
+/* Red Banner for DB Duplicates */
 .duplicate-box {
   background: #fef2f2;
   border-color: #fecaca;
   color: #991b1b;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+/* Yellow Banner for Active Queue Duplicates */
+.queue-dup-box {
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  color: #92400e;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -662,6 +849,14 @@ select {
   max-height: 420px;
 }
 
+.stage-canvas-wrap {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  cursor: crosshair;
+  user-select: none;
+}
+
 .stage-img {
   display: block;
   max-width: 100%;
@@ -718,4 +913,170 @@ select {
   justify-content: flex-end;
   gap: 0.5rem;
   margin-top: auto;
+}
+
+/* Editable Vehicle Plate Input, Validation Highlights & Stock Badges */
+.plate-input {
+  width: 118px !important;
+  background: #1e293b !important;
+  color: #ffffff !important;
+  border: 1px solid #334155 !important;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 0.25rem 0.45rem !important;
+  flex-shrink: 0;
+}
+
+.vehicle-card-warning {
+  border-color: #f59e0b !important;
+  background: #fffbeb !important;
+}
+
+.validated-field-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.flex-1 {
+  flex: 1;
+  min-width: 0;
+}
+
+.input-error-highlight {
+  border: 2px solid #dc2626 !important;
+  background: #fef2f2 !important;
+  color: #991b1b !important;
+}
+
+.input-warn-highlight {
+  border: 2px solid #f59e0b !important;
+  background: #fffbeb !important;
+}
+
+.field-error-tag {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #dc2626;
+}
+
+.field-warn-tag {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #b45309;
+  margin-top: 0.2rem;
+}
+
+.talon-jobs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.talon-job-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e40af;
+  padding: 0.45rem 0.65rem;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.talon-job-card.job-error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+.stock-mini-tag {
+  font-size: 0.7rem;
+  color: #475569;
+  margin-top: 0.2rem;
+}
+
+.stock-pill {
+  float: right;
+  background: #dcfce7;
+  color: #166534;
+  font-size: 0.7rem;
+  padding: 0.08rem 0.35rem;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+/* Stock Browser Modal */
+.stock-toolbar {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  margin: 0.65rem 0;
+}
+
+.stock-add-bar {
+  display: grid;
+  grid-template-columns: 180px 1fr auto;
+  gap: 0.5rem;
+  background: #f8fafc;
+  padding: 0.55rem;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  margin-bottom: 0.65rem;
+}
+
+.stock-table-scroll {
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+/* Document Viewer Panel */
+.viewer-panel {
+  position: sticky;
+  top: 0.75rem;
+  height: calc(100vh - 4.75rem);
+}
+
+.viewer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  background: #f8fafc;
+  padding: 0.45rem;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+}
+
+.page-Nav {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: auto;
+}
+
+.viewer-viewport {
+  flex: 1;
+  background: #0f172a;
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  user-select: none;
+}
+
+.viewer-viewport:active {
+  cursor: grabbing;
+}
+
+.viewer-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transition: transform 0.05s linear;
+  transform-origin: center center;
 }

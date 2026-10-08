@@ -1,5 +1,4 @@
 import os
-from talon_scanner import TalonCropConfig, prepare_talon_for_ocr
 import re
 import time
 from datetime import datetime
@@ -10,155 +9,93 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from nomenclature import DEFAULT_DB_PATH, get_prioritized_models, record_model_attempt
+from talon_scanner import TalonCropConfig, prepare_talon_for_ocr
+
+load_dotenv()
+
+client = genai.Client()
+
+MODEL_CHAIN = [
+    "gemini-2.5-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-3.6-flash",
+]
+
+ATTEMPT_TIMEOUT_MS = 45_000
+
+FALLBACK_TAGS = (
+    "503",
+    "504",
+    "DEADLINE",
+    "UNAVAILABLE",
+    "429",
+    "RESOURCE_EXHAUSTED",
+    "NOT_FOUND",
+)
+RETRY_SAME_MODEL_TAGS = ("503", "UNAVAILABLE")
+
+T = TypeVar("T", bound=BaseModel)
+
+
+# --- Data Schemas ------------------------------------------------------------------------
 
 class PartItem(BaseModel):
     part_code: str = Field(
         description=(
-            "The primary manufacturer part code or SKU (Cod Articol / Cod Piesă) as stored in WinMentor. "
-            "Follow the supplier-specific rules in the prompt: strip Materom ' - ' suffixes, extract inline "
-            "codes before the hyphen on Autonet/AutoTotal, extract the manufacturer/tint code from the "
-            "description on Sprint Car (never use Cod articol client or 13-digit EAN barcodes), and never "
-            "use 8-digit customs tariff codes (Cod tarifar vamal) or NC8/CPV codes."
+            "Primary manufacturer part code or paint code for WinMentor's 'Cod extern' column. "
+            "RULES BY SUPPLIER: "
+            "1) Materom ('GDB2063 - 11-477-298 - TRW - OEM'): take ONLY the first segment before ' - ' ('GDB2063'). "
+            "2) Autonet ('FD4287313P PRA -Carenaj roata' or '21904FE -Brat suspensie'): take the code before '-' ('FD4287313P PRA', '21904FE'). Ignore the 8-digit customs code ('Cod tarifar vamal'). "
+            "3) AD Auto Total ('70-31414-10 SET GARNITURI... NC8: ...'): take ONLY the leading code token ('70-31414-10', '6PK1698CT'). Ignore NC8 and CPV codes. "
+            "4) Sprint Car Distribution: NEVER use 'Cod articol client' (like '7564H.3500' or '0100H.1000') and NEVER use 13-digit EAN barcodes. Extract the manufacturer code from 'Descriere articol' (like '37180074G', '37130080G', '9010050', or paint code 'MB518'). If none exists, use the first uppercase product noun ('CATALIZ', 'FOND', 'CHIT', 'LAC'). "
+            "5) Invoices without a code column (e.g. Marcos Serv 'USA STANGA FATA DACIA DOKKER'): use the main part noun in uppercase ('USA', 'BARA', 'HAYON')."
         )
     )
     part_name: str = Field(
-        description=(
-            "The clean description or name of the part (Denumire), excluding leading inline part codes, "
-            "13-digit EAN barcodes, and trailing NC8/CPV customs tags."
-        )
+        description="Clean Romanian description of the part (without NC8/CPV/customs codes or barcodes)."
     )
-    quantity: float = Field(description="The quantity ordered (Cantitate).")
-    unit_price: float = Field(description="The price per unit excluding VAT (Preț unitar fără TVA).")
-    total_price: float = Field(description="The total price for this line item excluding VAT (Valoare fără TVA).")
+    quantity: float = Field(description="Quantity ordered or invoiced.")
+    unit_price: float = Field(description="Unit price WITHOUT VAT (Pret unitar fara TVA).")
+    total_price: float = Field(description="Line total WITHOUT VAT (Valoare fara TVA).")
 
 
 class SupplierQuote(BaseModel):
-    supplier_name: str = Field(
-        description="The name of the vendor/supplier (e.g., MATEROM, AUTONET IMPORT, AD AUTO TOTAL, SPRINT CAR DISTRIBUTION)."
-    )
+    supplier_name: str = Field(description="Name of the auto parts supplier.")
     document_code: str = Field(
-        description="The invoice or quote number (Serie și număr, e.g. 'FB2AX10394098', 'IN26 000001380')."
+        description="The unique invoice or offer number (Numar factura / Numar oferta)."
     )
-    quote_date: str = Field(description="The date of the document in YYYY-MM-DD format.")
-    parts: list[PartItem] = Field(description="The list of all auto parts and billable items on the quote/invoice.")
+    quote_date: str = Field(
+        description="Date of the quote or invoice in YYYY-MM-DD format."
+    )
+    parts: list[PartItem] = Field(description="List of auto parts on the document.")
+    total_fara_tva: float | None = Field(
+        default=None,
+        description="Document subtotal WITHOUT VAT if printed on the document, else null.",
+    )
 
 
 class VehicleDocument(BaseModel):
-    numar_inmatriculare: str = Field(description="The license plate number (Point A on the Talon).")
-    serie_sasiu: str = Field(description="The 17-character Vehicle Identification Number or VIN (Point E on the Talon).")
+    numar_inmatriculare: str = Field(
+        description="Vehicle registration plate (Field A on the Romanian Talon, e.g. B-123-ABC or CT-61-MLG)."
+    )
+    serie_sasiu: str = Field(
+        description="17-character VIN / Chassis number (Field E on the Romanian Talon)."
+    )
     marca_model: str = Field(
         default="",
-        description="The vehicle make and commercial model (Points D.1 and D.3 on the Talon, e.g. 'OPEL CORSA', 'PEUGEOT 208').",
+        description=(
+            "Vehicle Make and Model (Fields D.1 and D.3 on the Romanian Talon, "
+            "e.g. 'OPEL CORSA', 'PEUGEOT 208', 'DACIA DOKKER')."
+        ),
     )
 
 
-T = TypeVar("T", bound=BaseModel)
-
-load_dotenv()
-
-# Client-level timeout (ms): ceiling for file uploads and anything without its own timeout.
-client = genai.Client(http_options=types.HttpOptions(timeout=120_000))
-
-# Ordered by what responded reliably in testing. Re-test periodically: availability of
-# the newest models changes. Avoid 'gemini-flash-latest': it follows the newest model.
-MODEL_CHAIN = [
-    "gemini-3.5-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash-lite",
-]
-
-# Per-attempt timeout (ms) for generation, so a dead model doesn't block for minutes.
-ATTEMPT_TIMEOUT_MS = 45_000
-
-# Errors that mean "try the next model".
-FALLBACK_TAGS = ("503", "504", "DEADLINE", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "NOT_FOUND")
-# Errors worth one quick retry on the same model before falling back (brief overloads).
-RETRY_SAME_MODEL_TAGS = ("503", "UNAVAILABLE")
-
-
-def _normalize_code(code: str) -> str:
-    """Canonical form of a part code: trimmed, inner whitespace collapsed, uppercase."""
-    return re.sub(r"\s+", " ", code).strip().upper()
-
-
-def _is_eco_tax_line(item: PartItem) -> bool:
-    """Detects environmental / lubricant fund tax lines ('Taxa fond mediu lubrifianti')."""
-    code_up = item.part_code.upper()
-    name_low = item.part_name.lower()
-    return (
-        "TAXA_MEDIU" in code_up
-        or "TAXA MEDIU" in code_up
-        or ("taxa" in name_low and "mediu" in name_low)
-    )
-
-
-def _rollup_eco_taxes(parts: list[PartItem]) -> list[PartItem]:
-    """
-    Rolls 'Taxa fond mediu lubrifianti' into the preceding lubricant/oil line item
-    so the tax is included in the product's value rather than exported as a separate row.
-    """
-    merged: list[PartItem] = []
-    for item in parts:
-        if _is_eco_tax_line(item) and merged:
-            target = merged[-1]
-            new_total = round(target.total_price + item.total_price, 2)
-            qty = target.quantity if target.quantity != 0 else 1.0
-            new_unit = round(new_total / qty, 4)
-            merged[-1] = PartItem(
-                part_code=target.part_code,
-                part_name=target.part_name,
-                quantity=target.quantity,
-                unit_price=new_unit,
-                total_price=new_total,
-            )
-        else:
-            merged.append(item)
-    return merged
-
-
-def _generate_structured(gemini_file: types.File, prompt: str, schema: type[T]) -> T:
-    """Runs the request down MODEL_CHAIN and returns a parsed instance of `schema`."""
-    last_error: Exception | None = None
-
-    for model_name in MODEL_CHAIN:
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(  # pyright: ignore[reportUnknownMemberType]
-                    model=model_name,
-                    contents=[gemini_file, prompt],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=schema,
-                        temperature=0.0,
-                        http_options=types.HttpOptions(timeout=ATTEMPT_TIMEOUT_MS),
-                    ),
-                )
-            except Exception as e:
-                last_error = e
-                msg = str(e)
-                if attempt == 0 and any(tag in msg for tag in RETRY_SAME_MODEL_TAGS):
-                    print(f"[Retry] {model_name} unavailable. Retrying once...")
-                    time.sleep(2)
-                    continue
-                if any(tag in msg for tag in FALLBACK_TAGS):
-                    print(f"[Fallback] {model_name} failed ({msg[:80]}). Trying next model...")
-                    break
-                # Anything else (e.g. invalid API key, bad request) is a real error.
-                raise
-
-            parsed = response.parsed
-            if isinstance(parsed, schema):
-                return parsed
-
-            # Output was empty, blocked, or not valid against the schema.
-            print(f"[Fallback] {model_name} returned unparseable output. Trying next model...")
-            break
-
-    raise RuntimeError("All models in the fallback chain failed.") from last_error
-
+# --- Internal Helpers & Model Telemetry Router -------------------------------------------
 
 def _delete_quietly(gemini_file: types.File) -> None:
-    """Remove the uploaded file from Google's storage; never let cleanup raise."""
     if not gemini_file.name:
         return
     try:
@@ -167,93 +104,145 @@ def _delete_quietly(gemini_file: types.File) -> None:
         pass
 
 
+def _generate_structured(gemini_file: types.File, prompt: str, schema: type[T]) -> T:
+    """
+    Routes OCR requests across the dynamically prioritized model pool and records
+    every attempt (success, 429 rate-limit, 503 busy, latency) into `nomenclature.db`.
+    """
+    last_error: Exception | None = None
+    ordered_models = get_prioritized_models(MODEL_CHAIN, db_path=DEFAULT_DB_PATH)
+
+    for model_name in ordered_models:
+        for attempt in range(2):
+            t0 = time.perf_counter()
+            try:
+                response = client.models.generate_content(  # pyright: ignore[reportUnknownMemberType]
+                    model=model_name,
+                    contents=[gemini_file, prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=schema,
+                        temperature=0.0,
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            disable=True
+                        ),
+                        http_options=types.HttpOptions(timeout=ATTEMPT_TIMEOUT_MS),
+                    ),
+                )
+            except Exception as e:
+                last_error = e
+                msg = str(e)
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                    record_model_attempt(model_name, "429", elapsed_ms, db_path=DEFAULT_DB_PATH)
+                    print(
+                        f"[Fallback 429] {model_name} rate-limited (120s cooldown). Trying next model..."
+                    )
+                    break
+                if any(tag in msg for tag in RETRY_SAME_MODEL_TAGS):
+                    record_model_attempt(model_name, "503", elapsed_ms, db_path=DEFAULT_DB_PATH)
+                    if attempt == 0:
+                        print(f"[Retry 503] {model_name} busy. Retrying once...")
+                        time.sleep(1.5)
+                        continue
+                    print(f"[Fallback 503] {model_name} unavailable. Trying next model...")
+                    break
+                record_model_attempt(model_name, "error", elapsed_ms, db_path=DEFAULT_DB_PATH)
+                if any(tag in msg for tag in FALLBACK_TAGS):
+                    print(f"[Fallback] {model_name} failed ({msg[:80]}). Trying next model...")
+                    break
+                raise
+
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            parsed = response.parsed
+            if isinstance(parsed, schema):
+                record_model_attempt(model_name, "success", elapsed_ms, db_path=DEFAULT_DB_PATH)
+                return parsed
+
+            record_model_attempt(model_name, "error", elapsed_ms, db_path=DEFAULT_DB_PATH)
+            print(f"[Fallback] {model_name} returned unparseable output. Trying next model...")
+            break
+
+    raise RuntimeError("All models in the fallback chain failed.") from last_error
+
+
+# --- Eco-Tax Rollup (Rule 3.3: 'Taxa fond mediu lubrifianti') ----------------------------
+
+_ECO_TAX_PATTERNS = (
+    "taxa fond mediu",
+    "fond mediu lubrifianti",
+    "taxa eco",
+    "ecotaxa",
+)
+
+
+def _is_eco_tax_line(item: PartItem) -> bool:
+    combined = f"{item.part_code} {item.part_name}".lower()
+    return any(pat in combined for pat in _ECO_TAX_PATTERNS)
+
+
+def _is_oil_or_lubricant(item: PartItem) -> bool:
+    combined = f"{item.part_code} {item.part_name}".lower()
+    return any(
+        kw in combined
+        for kw in ("ulei", "5w30", "5w40", "0w30", "0w20", "10w40", "lubrifiant", "antigel")
+    )
+
+
+def _rollup_eco_taxes(parts: list[PartItem]) -> list[PartItem]:
+    tax_lines = [p for p in parts if _is_eco_tax_line(p)]
+    if not tax_lines:
+        return parts
+
+    normal_lines = [p for p in parts if not _is_eco_tax_line(p)]
+    if not normal_lines:
+        return parts
+
+    tax_total = round(sum(t.total_price for t in tax_lines), 2)
+    target_idx = next(
+        (i for i, p in enumerate(normal_lines) if _is_oil_or_lubricant(p)),
+        0,
+    )
+    target = normal_lines[target_idx]
+    new_total = round(target.total_price + tax_total, 2)
+    new_unit = (
+        round(new_total / target.quantity, 4) if target.quantity != 0 else new_total
+    )
+    normal_lines[target_idx] = PartItem(
+        part_code=target.part_code,
+        part_name=target.part_name,
+        quantity=target.quantity,
+        unit_price=new_unit,
+        total_price=new_total,
+    )
+    return normal_lines
+
+
+# --- Extraction Functions ----------------------------------------------------------------
+
 def extract_quote_data(file_path: str) -> SupplierQuote:
-    """Uploads a PDF or image of a quote/invoice and returns structured Part data."""
     prompt = """
-    You are an expert data extractor for Romanian auto repair shops.
-    Extract the supplier details and every line item from this quote/invoice.
-    If the page is rotated or sideways, read it in its proper orientation.
-    Ignore subtotals ('TOTAL NIR', 'Total:'), shipping fees, or legal footers.
-
-    NUMBER FORMATTING:
-    Romanian documents mix comma and dot separators (e.g. '1.234,56' or '1,072.29') and
-    occasionally have OCR colons ('59:97'). Return all quantities, unit prices (up to 3-4 decimals,
-    e.g. 306.369), and line totals (excluding VAT) as plain numbers with a dot decimal (1234.56).
-
-    SUPPLIER-SPECIFIC PART CODE & DESCRIPTION RULES:
-    1. MATEROM: If the code column contains multiple segments separated by ' - '
-       (e.g. 'GDB2063 - 11-477-298 - TRW - OEM'), extract ONLY the first manufacturer SKU ('GDB2063').
-    2. AUTONET IMPORT: There is NO separate part code column (NEVER use the 8-digit 'Cod tarifar vamal'
-       column like 70091000 or 87088099). The part code is printed at the start of 'Denumirea produselor'
-       before the hyphen:
-       - 'FD4287313P PRA -Retrovizor exterior' -> part_code: 'FD4287313P PRA', part_name: 'Retrovizor exterior'
-       - '21904 FE -Brat suspensie...' -> part_code: '21904FE', part_name: 'Brat suspensie...'
-       - 'CCE-ESS 08-Banda mastic...' -> part_code: 'CCE-ESS 08', part_name: 'Banda mastic...'
-       - 'LIQ LL III 5W30 5L -LIQUI MOLY...' -> part_code: 'LIQ LL III 5W30 5L', part_name: 'LIQUI MOLY...'
-       - For 'Taxa fond mediu lubrifianti...', use part_code: 'TAXA_MEDIU'.
-    3. AD AUTO TOTAL: The part code is the first token at the start of 'Denumirea produselor'
-       (e.g. '70-31414-10', '6PK1698CT', '15-41286-01', 'F89-40003.25'). Strip 'NC8...' and
-       'CPV = ...' codes from both part_code and part_name.
-    4. SPRINT CAR DISTRIBUTION: NEVER use 'Cod articol client' (like 7564H.3500, 0100H.1000, 3403K.0000)
-       and NEVER use the 13-digit EAN 'Cod de bare' (like 4025331466970 or *8026376246318).
-       Extract the manufacturer or tint code embedded inside 'Denumirea produselor':
-       - Paint mixing tints (e.g. '32035180M MB518 FINE SILVER/3.5LT') -> part_code: 'MB518'
-       - '37180074G LAC HS PERMAFAST 8007/1LT' -> part_code: '37180074G', part_name: 'LAC HS PERMAFAST 8007/1LT'
-       - '37130080G CATALIZ. PERMAFAST 3008 HS/1LT' -> part_code: '37130080G', part_name: 'CATALIZ. PERMAFAST 3008 HS/1LT'
-       - '9010050 BUR.ABRAZ.BEJ MICROFINE 2 FETE' -> part_code: '9010050', part_name: 'BUR.ABRAZ.BEJ MICROFINE 2 FETE'
-       - If no alphanumeric manufacturer code exists in the description (after ignoring 13-digit barcodes),
-         use the primary product type keyword: 'CATALIZ' (for C15/C67), 'FOND' (for F91), 'LAC' (for H79), or 'CHIT'.
-    5. AUTOMOTIVE REFINISH DISTRIBUTION (ARD): Use the dedicated 'COD(ID)' column (e.g. 'ARD4MX300M', 'IND39233').
-    6. NO PART CODE COLUMN (e.g. MARCOS SERV AUTOMOBILE): Use the primary part noun in uppercase
-       (e.g. 'USA' for 'USA STANGA FATA DACIA DOKKER', 'HAYON', 'BARA FATA').
+    Extract all auto parts from this Romanian supplier quote or invoice.
+    Pay close attention to the supplier-specific part code rules:
+    - Materom: extract ONLY the first code before ' - ' (e.g., 'GDB2063').
+    - Autonet: extract the inline SKU + brand code at the start of the description before '-' (e.g., 'FD4287313P PRA' or '21904FE'), ignoring the 8-digit customs code ('Cod tarifar vamal').
+    - AD Auto Total: extract ONLY the first token in the description (e.g., '70-31414-10', '6PK1698CT'), ignoring trailing NC8 and CPV codes.
+    - Sprint Car Distribution: NEVER use 'Cod articol client' (like '7564H.3500') or the 13-digit EAN barcode. Extract the code embedded inside the description (like '37180074G', '37130080G', '9010050', or paint code 'MB518'), or the main uppercase noun ('CATALIZ', 'FOND', 'CHIT', 'LAC') if no manufacturer code is present.
+    - Always extract unit prices and line totals WITHOUT VAT (fara TVA).
+    - Convert the document date to YYYY-MM-DD.
     """
     gemini_file = client.files.upload(file=file_path)
     try:
         quote = _generate_structured(gemini_file, prompt, SupplierQuote)
+        quote.parts = _rollup_eco_taxes(quote.parts)
+        return quote
     finally:
         _delete_quietly(gemini_file)
 
-    # Post-processing normalization
-    quote.supplier_name = quote.supplier_name.strip()
-    quote.document_code = quote.document_code.strip()
-    quote.quote_date = quote.quote_date.strip()
-
-    for item in quote.parts:
-        item.part_code = _normalize_code(item.part_code)
-        item.part_name = re.sub(r"\s+", " ", item.part_name).strip()
-
-    quote.parts = _rollup_eco_taxes(quote.parts)
-    return quote
-
-
-# def extract_vehicle_data(file_path: str) -> VehicleDocument:
-#     """Uploads a Talon or CIV photo and extracts the license plate, VIN, and Make/Model."""
-#     prompt = """
-#     Extract the vehicle registration data from this Romanian vehicle document (Talon / CIV).
-#     Copy the license plate (Point A), the 17-character VIN (Point E), and the Make + Model
-#     (Points D.1 and D.3, e.g. 'OPEL CORSA' or 'PEUGEOT 208') as printed.
-#     A VIN has 17 characters and never contains the letters I, O or Q.
-#     Do not guess characters you cannot read.
-#     """
-#     gemini_file = client.files.upload(file=file_path)
-#     try:
-#         doc = _generate_structured(gemini_file, prompt, VehicleDocument)
-#     finally:
-#         _delete_quietly(gemini_file)
-
-#     doc.serie_sasiu = doc.serie_sasiu.upper().replace(" ", "")
-#     doc.numar_inmatriculare = doc.numar_inmatriculare.upper().strip()
-#     doc.marca_model = re.sub(r"\s+", " ", doc.marca_model).strip().upper()
-#     return doc
 
 def extract_vehicle_data(
     file_path: str, crop_config: TalonCropConfig | None = None
 ) -> VehicleDocument:
-    """
-    1. Locally perspective-flattens the Talon photo, crops ONLY the Top-Left A-to-K region,
-       and converts it into a high-contrast monochrome scan via talon_scanner.py.
-    2. Uploads ONLY that cropped A-to-K scan image to Gemini and deletes it immediately after.
-    """
     prompt = """
     Extract the vehicle registration data from this cropped Top-Left (A to K) section of a
     Romanian vehicle registration document (Talon / Certificat de inmatriculare).
@@ -276,48 +265,58 @@ def extract_vehicle_data(
     doc.marca_model = re.sub(r"\s+", " ", doc.marca_model).strip().upper()
     return doc
 
-# --- Validation: call these after extraction and surface the warnings to the user ---
 
-def validate_vehicle(doc: VehicleDocument) -> list[str]:
-    """Returns a list of problems; an empty list means the checks passed."""
+# --- Validation Functions ----------------------------------------------------------------
+
+_VIN_RE = re.compile(r"^[A-HJ-NPR-Z0-9]{17}$")
+_RO_PLATE_RE = re.compile(r"^(B|[A-Z]{2})[\s\-]?\d{2,3}[\s\-]?[A-Z]{3}$")
+
+
+def validate_quote(quote: SupplierQuote, tolerance: float = 0.05) -> list[str]:
     issues: list[str] = []
-    vin = doc.serie_sasiu
-    if len(vin) != 17:
-        issues.append(f"VIN has {len(vin)} characters, expected 17: {vin!r}")
-    if not vin.isalnum():
-        issues.append(f"VIN contains non-alphanumeric characters: {vin!r}")
-    if any(c in "IOQ" for c in vin):
-        issues.append(f"VIN contains I, O or Q, which are not valid in a VIN: {vin!r}")
-    if not doc.numar_inmatriculare:
-        issues.append("License plate is empty")
-    return issues
-
-
-def validate_quote(quote: SupplierQuote) -> list[str]:
-    """Returns a list of problems; an empty list means the checks passed."""
-    issues: list[str] = []
+    if not quote.parts:
+        issues.append("No parts were extracted from the quote.")
 
     try:
         datetime.strptime(quote.quote_date, "%Y-%m-%d")
     except ValueError:
-        issues.append(f"Date is not a valid YYYY-MM-DD value: {quote.quote_date!r}")
+        issues.append(f"quote_date '{quote.quote_date}' is not a valid YYYY-MM-DD date.")
 
-    if not quote.document_code.strip():
-        issues.append("Document code is empty")
-    if not quote.parts:
-        issues.append("No line items were extracted")
-
+    lines_sum = 0.0
     for i, p in enumerate(quote.parts, start=1):
-        # Unit prices are often rounded to 2-4 decimals while the line total is exact,
-        # so allow a tolerance that scales with abs(quantity) (handles negative storno rows too).
-        tolerance = 0.01 * max(abs(p.quantity), 1.0) + 0.01
-        expected = p.quantity * p.unit_price
-        if abs(expected - p.total_price) > tolerance:
-            issues.append(
-                f"Line {i} ({p.part_code}): {p.quantity} x {p.unit_price} = {expected:.2f}, "
-                f"but total is {p.total_price:.2f}"
-            )
         if not p.part_code.strip():
-            issues.append(f"Line {i}: empty part code")
+            issues.append(f"Line {i} ('{p.part_name}'): missing part_code.")
+        expected = round(abs(p.quantity) * p.unit_price, 2)
+        if abs(expected - abs(p.total_price)) > tolerance:
+            issues.append(
+                f"Line {i} ({p.part_code}): {p.quantity} * {p.unit_price} = {expected:.2f}, "
+                f"but total_price is {p.total_price:.2f}."
+            )
+        lines_sum += p.total_price
 
+    if (
+        quote.total_fara_tva is not None
+        and abs(lines_sum - quote.total_fara_tva) > tolerance
+    ):
+        issues.append(
+            f"Sum of lines ({lines_sum:.2f}) does not match document total_fara_tva ({quote.total_fara_tva:.2f})."
+        )
+    return issues
+
+
+def validate_vehicle(doc: VehicleDocument) -> list[str]:
+    issues: list[str] = []
+    vin = doc.serie_sasiu
+    if len(vin) != 17:
+        issues.append(f"VIN '{vin}' has {len(vin)} characters (expected 17).")
+    elif not _VIN_RE.match(vin):
+        bad = sorted({c for c in vin if not re.match(r"[A-HJ-NPR-Z0-9]", c)})
+        issues.append(f"VIN '{vin}' contains invalid characters: {bad} (I, O, Q are never valid).")
+
+    if not _RO_PLATE_RE.match(doc.numar_inmatriculare):
+        issues.append(
+            f"Plate '{doc.numar_inmatriculare}' does not match standard Romanian format."
+        )
+    if not doc.marca_model:
+        issues.append("Vehicle Make/Model (Fields D.1/D.3) was not detected on the Talon.")
     return issues
