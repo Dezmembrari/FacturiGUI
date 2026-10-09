@@ -99,13 +99,24 @@ function canonicalSupplierToken(sup: string): string {
   return compact.slice(0, 12)
 }
 
+function extractWinmentorDocNr(docCode: string): string {
+  const cleaned = docCode.trim().toUpperCase()
+  if (/^\d{1,7}$/.test(cleaned)) return cleaned
+  const matches = cleaned.match(/\d+/g)
+  if (!matches || matches.length === 0) return cleaned
+  const last = matches[matches.length - 1]
+  if (last.length > 6 && last.startsWith('00')) return last.replace(/^0+/, '') || '0'
+  if (last.length > 6) return last.slice(-6)
+  return last
+}
+
 // Tracks all tab IDs that appear 2+ times in the active queue (Yellow highlight)
 const queueDuplicateIds = computed<Set<string>>(() => {
   const counts = new Map<string, string[]>()
   for (const q of props.quoteQueue) {
     if (!q.supplierName || !q.documentCode) continue
     const sup = canonicalSupplierToken(q.supplierName)
-    const nr = q.documentCode.trim().replace(/^0+/, '') || '0'
+    const nr = extractWinmentorDocNr(q.documentCode)
     if (!sup || !nr) continue
     const key = `${sup}:${nr}`
     const list = counts.get(key) ?? []
@@ -291,7 +302,7 @@ async function runLiveSearch() {
       </div>
     </div>
 
-    <!-- Bulk Quote Queue Bar with Red (DB Duplicate) & Yellow (Queue Duplicate) Highlighting -->
+    <!-- Bulk Quote Queue Bar -->
     <div v-if="quoteQueue.length > 0" class="queue-bar">
       <div class="queue-bar-header">
         <span class="queue-title">
@@ -338,7 +349,7 @@ async function runLiveSearch() {
 
           <span class="pill-label">
             <template v-if="q.supplierName">
-              {{ q.supplierName.slice(0, 14) }} #{{ q.documentCode }}
+              {{ q.supplierName.slice(0, 14) }} #{{ extractWinmentorDocNr(q.documentCode) }}
             </template>
             <template v-else>
               {{ q.fileName }}
@@ -379,12 +390,12 @@ async function runLiveSearch() {
 
     <!-- Ready / Exported Invoice Workspace -->
     <template v-else>
-      <!-- Duplicate in Active Queue Warning (Yellow Banner) -->
+      <!-- Duplicate in Active Queue Warning -->
       <div v-if="duplicateQueueTab" class="alert-box queue-dup-box">
         <div>
           <strong>⚠️ Duplicate Invoice in Active Queue:</strong>
           This invoice ({{ currentQuote.supplierName }}
-          <code>#{{ currentQuote.documentCode }}</code>) is duplicated in tab
+          <code>#{{ currentQuote.documentCode }}</code>) matches queued tab
           <strong>{{ duplicateQueueTab.fileName }}</strong> ({{
             duplicateQueueTab.supplierName
           }}).
@@ -393,11 +404,11 @@ async function runLiveSearch() {
           class="btn btn-secondary btn-sm"
           @click="emit('remove-queue', currentQuote.id)"
         >
-          Remove This Duplicate Tab
+          Remove Duplicate Tab
         </button>
       </div>
 
-      <!-- Duplicate in Database Warning (Red Banner) -->
+      <!-- Duplicate in Database Warning -->
       <div v-if="currentQuote.duplicateWarning" class="alert-box duplicate-box">
         <div>
           <strong>🛑 Duplicate Invoice Detected in DB:</strong>
@@ -428,7 +439,7 @@ async function runLiveSearch() {
             <input
               v-model="currentQuote.documentCode"
               class="mono bold"
-              placeholder="e.g. 394623 or 078561"
+              placeholder="e.g. 394623 or 001348"
             />
             <button
               class="btn btn-secondary btn-xs"
@@ -606,7 +617,7 @@ async function runLiveSearch() {
                 </div>
               </td>
 
-              <!-- Auto-Growing Article Name (Locked Width, No Manual Resize) + Conflict Resolver -->
+              <!-- Auto-Growing Article Name (Locked Width, No Manual Resize) -->
               <td class="name-cell">
                 <div class="autogrow-name" :data-replicated-value="row.part_name">
                   <textarea

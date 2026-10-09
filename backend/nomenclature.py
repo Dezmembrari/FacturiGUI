@@ -557,7 +557,7 @@ def search_codes(
         elif qkey and len(qkey) >= 2 and key.startswith(qkey):
             reason, score = "code_prefix", 0.92
         elif qwords and nwords and all(any(nw == qw for nw in nwords) for qw in qwords):
-            # Every query word is an exact whole word in the article name (e.g. 'LAC' in 'LAC HS PERMAFAST')
+            # Every query word is an exact whole word in the article name
             first_bonus = 0.05 if nwords[0] == qwords[0] else 0.0
             reason, score = "exact_word_in_name", round(0.85 + first_bonus, 3)
         elif qwords and nwords and all(
@@ -695,7 +695,7 @@ def update_or_add_part(part_code: str, part_name: str, db_path: str = DEFAULT_DB
     upsert_parts([(part_code, part_name)], db_path=db_path, update_stock_values=False)
 
 
-# --- Duplicate Invoice Protection & Leading-Zero Trailing Digits (Points 5, 7, 10) -------
+# --- Duplicate Invoice Protection & Leading-Zero Trailing Digits -------------------------
 
 def canonical_supplier_token(supplier_name: str) -> str:
     decomposed = unicodedata.normalize("NFKD", supplier_name).upper()
@@ -713,7 +713,7 @@ def extract_trailing_doc_digits(doc_code: str) -> str:
     """
     Extracts the trailing invoice digits (up to 6 digits) while allowing leading zeros
     (e.g. '078561' stays '078561', '01234' stays '01234').
-    Only strips excess zero-padding when a raw number is >6 digits starting with '000' (like Sprint '000001380').
+    Only strips excess zero-padding when a raw number is >6 digits starting with '000'.
     """
     cleaned = unicodedata.normalize("NFKD", doc_code).upper().strip()
     if re.fullmatch(r"\d{1,7}", cleaned):
@@ -831,7 +831,7 @@ def list_export_history(limit: int = 50, db_path: str = DEFAULT_DB_PATH) -> list
     return [ExportLogEntry(*r) for r in rows]
 
 
-# --- Gemini Model Telemetry & Dynamic Priority (Point 6 / Point 12) ----------------------
+# --- Gemini Model Telemetry & Dynamic Priority -------------------------------------------
 
 def get_prioritized_models(
     pool: list[str] | None = None, db_path: str = DEFAULT_DB_PATH
@@ -957,3 +957,40 @@ def list_model_stats(db_path: str = DEFAULT_DB_PATH) -> list[ModelStatEntry]:
         else:
             out.append(ModelStatEntry(m, 0, 0, 0, 0, 0.0, False, 0, None))
     return out
+
+
+# --- Standalone Stock Deduction for Bon de Consum ----------------------------------------
+
+def deduct_stock_quantities(
+    items: list[tuple[str, float]], db_path: str = DEFAULT_DB_PATH
+) -> None:
+    """
+    Deducts consumed quantities from `parts.stoc` when a standalone Bon de Consum is generated.
+    Also proportionally scales `parts.sold` (total remaining stock valuation).
+    """
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _connect(db_path) as conn:
+        for code, qty in items:
+            norm_code = normalize_code(code)
+            row = cast(
+                tuple[float, float] | None,
+                conn.execute(
+                    "SELECT stoc, sold FROM parts WHERE part_code = ?", (norm_code,)
+                ).fetchone(),
+            )
+            if row is not None:
+                cur_stoc, cur_sold = row
+                new_stoc = max(0.0, round(cur_stoc - qty, 4))
+                new_sold = (
+                    round((cur_sold / cur_stoc) * new_stoc, 2)
+                    if cur_stoc > 0
+                    else 0.0
+                )
+                conn.execute(
+                    """
+                    UPDATE parts
+                    SET stoc = ?, sold = ?, last_used = ?
+                    WHERE part_code = ?
+                    """,
+                    (new_stoc, new_sold, now, norm_code),
+                )

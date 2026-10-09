@@ -201,3 +201,20 @@ frontend/dist/
 .DS_Store
 .vscode/
 .idea/
+
+# Environments & Secrets
+.env
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Local Database
+backend/nomenclature.db
+
+# Generated Exports & Archives
+backend/exports/
+
+# Vue Build Files
+frontend/node_modules/
+frontend/dist/

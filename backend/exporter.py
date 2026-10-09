@@ -11,6 +11,7 @@ from pathlib import Path
 from nomenclature import (
     DEFAULT_DB_PATH,
     check_duplicate_invoice,
+    deduct_stock_quantities,
     normalize_code,
     record_export,
     upsert_parts,
@@ -124,7 +125,7 @@ def extract_winmentor_doc_number(doc_code: str) -> str:
     - Preserves leading zeros on 1-to-6 digit invoice numbers (e.g., '078561' -> '078561', '01234' -> '01234').
     - Only strips excess zero padding when a raw number is >6 digits starting with '00' (e.g., Sprint '000001380' -> '1380').
     """
-    cleaned = _ascii_clean(doc_code).upper()
+    cleaned = _ascii_clean(doc_code).upper().strip()
     if re.fullmatch(r"\d{1,7}", cleaned):
         return cleaned
     digits_groups: list[str] = re.findall(r"\d+", cleaned)
@@ -354,7 +355,7 @@ def build_bon_cons_content(
     return "\r\n".join(lines) + "\r\n", vouchers_meta
 
 
-# --- Main Exporter & Archiver ------------------------------------------------------------
+# --- Main Exporter & Archiver (Invoice Staging Mode) -------------------------------------
 
 def export_to_winmentor(
     payload: ExportInvoicePayload,
@@ -431,13 +432,11 @@ def export_to_winmentor(
     }
     bundle_bytes = json.dumps(bundle_data, indent=2, ensure_ascii=False).encode("utf-8")
 
-    # Write into monthly archive folder
     arch_bundle = archive_dir / "export_bundle.json"
     arch_fact = archive_dir / "FACT_INT.TXT"
     arch_bundle.write_bytes(bundle_bytes)
     arch_fact.write_bytes(fact_content.encode("utf-8"))
 
-    # Also write to root export folder for immediate access
     root_bundle = root_dir / "latest_export.json"
     root_fact = root_dir / "FACT_INT.TXT"
     root_bundle.write_bytes(bundle_bytes)
@@ -506,3 +505,128 @@ def retrigger_archived_export(
         "fact_int_path": str(dst / "FACT_INT.TXT"),
         "bon_cons_path": bon_path,
     }
+
+
+# --- Standalone Bon Consum Direct From Stock Export --------------------------------------
+
+@dataclass(frozen=True)
+class StandaloneBonItem:
+    part_code: str
+    part_name: str
+    um: str = DEFAULT_UM
+    quantity: float = 1.0
+    unit_price: float = 0.0
+
+
+@dataclass(frozen=True)
+class StandaloneBonPayload:
+    date: str  # YYYY-MM-DD
+    doc_number: str  # e.g. "1" or "001"
+    gestiune: str = DEFAULT_GESTIUNE
+    departament: Department | str = ""
+    vehicle: VehicleTarget | None = None
+    items: list[StandaloneBonItem] = field(default_factory=list[StandaloneBonItem])
+    deduct_from_stock: bool = True
+
+
+@dataclass(frozen=True)
+class StandaloneBonResult:
+    doc_number: str
+    archive_dir: str
+    bon_cons_path: str
+    lines_written: int
+    total_valoare: float
+
+
+def export_standalone_bon_consum(
+    payload: StandaloneBonPayload,
+    export_dir: str = DEFAULT_EXPORT_DIR,
+    db_path: str = DEFAULT_DB_PATH,
+) -> StandaloneBonResult:
+    """
+    Generates a standalone BON_CONS.TXT directly from warehouse stock (without Factura Intrare).
+    """
+    if not payload.items:
+        raise ValueError("Cannot generate a consumption voucher with zero items.")
+
+    wm_date = _to_winmentor_date(payload.date)
+    dt = datetime.strptime(payload.date.strip(), "%Y-%m-%d")
+    month_folder = dt.strftime("%Y-%m")
+    gestiune = _ascii_clean(payload.gestiune).upper() or DEFAULT_GESTIUNE
+
+    if payload.vehicle is not None and payload.vehicle.numar_inmatriculare.strip():
+        obs = format_bon_obs(payload.vehicle)
+        dept = (
+            _ascii_clean(
+                payload.vehicle.departament.value
+                if isinstance(payload.vehicle.departament, Department)
+                else str(payload.vehicle.departament)
+            ).upper()
+            if payload.vehicle.departament
+            else _ascii_clean(str(payload.departament)).upper()
+        )
+    else:
+        obs = ""
+        dept = _ascii_clean(str(payload.departament)).upper()
+
+    doc_num = _ascii_clean(payload.doc_number) or "1"
+    total_val = round(sum(i.quantity * i.unit_price for i in payload.items), 2)
+
+    lines: list[str] = [
+        "[InfoPachet]",
+        f"AnLucru={dt.year}",
+        f"LunaLucru={dt.month:02d}",
+        "TipDocument=BON DE CONSUM",
+        "TotalBonuri=1",
+        "",
+        "[Bon_1]",
+        "SerieCarnet=TOP",
+        f"NumarBon={doc_num}",
+        f"Data={wm_date}",
+        f"Gestiune={gestiune}",
+        f"CineConsuma={dept}",
+        f"Observatii={obs}",
+        "",
+        "[Items_1]",
+    ]
+
+    for idx, item in enumerate(payload.items, start=1):
+        code = normalize_code(item.part_code)
+        name = _ascii_clean(item.part_name).upper()
+        um = _ascii_clean(item.um) or DEFAULT_UM
+        lines.append(
+            f"Item_{idx}={code};{name};{um};"
+            f"{item.quantity:g};{item.unit_price:.4f};{obs}"
+        )
+
+    bon_content = "\r\n".join(lines) + "\r\n"
+
+    target_slug = (
+        re.sub(r"[^A-Z0-9]+", "_", obs.upper())
+        if obs
+        else (dept or "GENERAL")
+    )[:16]
+    timestamp_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
+    root_dir = Path(export_dir)
+    archive_dir = (
+        root_dir / "archive" / month_folder / f"{timestamp_slug}_BON_{target_slug}_{doc_num}"
+    )
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    arch_bon = archive_dir / "BON_CONS.TXT"
+    root_bon = root_dir / "BON_CONS.TXT"
+    arch_bon.write_bytes(bon_content.encode("utf-8"))
+    root_bon.write_bytes(bon_content.encode("utf-8"))
+
+    if payload.deduct_from_stock:
+        deduct_stock_quantities(
+            [(i.part_code, i.quantity) for i in payload.items], db_path=db_path
+        )
+
+    return StandaloneBonResult(
+        doc_number=doc_num,
+        archive_dir=str(archive_dir),
+        bon_cons_path=str(root_bon),
+        lines_written=len(payload.items),
+        total_valoare=total_val,
+    )

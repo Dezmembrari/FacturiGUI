@@ -20,6 +20,9 @@ from exporter import (
     extract_winmentor_doc_number,
     format_bon_obs,
     retrigger_archived_export,
+    StandaloneBonItem,
+    StandaloneBonPayload,
+    export_standalone_bon_consum,
 )
 from extractor import (
     extract_quote_data,
@@ -50,7 +53,7 @@ from talon_scanner import (
 DB_PATH: str = DEFAULT_DB_PATH
 EXPORT_DIR: str = DEFAULT_EXPORT_DIR
 
-app = FastAPI(title="FacturiGUI WinMentor Bridge", version="1.2.0")
+app = FastAPI(title="FacturiGUI WinMentor Bridge", version="1.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -223,6 +226,32 @@ class RetriggerResponseOut(BaseModel):
     bundle_json_path: str
     fact_int_path: str
     bon_cons_path: str | None
+
+
+class StandaloneBonItemIn(BaseModel):
+    part_code: str
+    part_name: str
+    um: str = DEFAULT_UM
+    quantity: float = Field(gt=0)
+    unit_price: float = Field(ge=0)
+
+
+class StandaloneBonRequestIn(BaseModel):
+    date: str
+    doc_number: str
+    gestiune: str = DEFAULT_GESTIUNE
+    departament: str = ""
+    vehicle: VehicleTargetIn | None = None
+    items: list[StandaloneBonItemIn]
+    deduct_from_stock: bool = True
+
+
+class StandaloneBonResponseOut(BaseModel):
+    doc_number: str
+    archive_dir: str
+    bon_cons_path: str
+    lines_written: int
+    total_valoare: float
 
 
 # --- Helpers -----------------------------------------------------------------------------
@@ -510,7 +539,7 @@ def export_invoice(req: ExportRequestIn) -> ExportResponseOut:
                         numar_inmatriculare=a.vehicle.numar_inmatriculare,
                         serie_sasiu=a.vehicle.serie_sasiu,
                         marca_model=a.vehicle.marca_model,
-                        departament=a.vehicle.departament,
+                        departament="",
                     )
                     if a.vehicle is not None
                     else None
@@ -569,5 +598,51 @@ def retrigger_export(req: RetriggerRequestIn) -> RetriggerResponseOut:
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/api/export-bon-consum", response_model=StandaloneBonResponseOut)
+def export_bon_consum_standalone(req: StandaloneBonRequestIn) -> StandaloneBonResponseOut:
+    try:
+        items = [
+            StandaloneBonItem(
+                part_code=i.part_code,
+                part_name=i.part_name,
+                um=i.um,
+                quantity=i.quantity,
+                unit_price=i.unit_price,
+            )
+            for i in req.items
+        ]
+        target_veh = (
+            VehicleTarget(
+                numar_inmatriculare=req.vehicle.numar_inmatriculare,
+                serie_sasiu=req.vehicle.serie_sasiu,
+                marca_model=req.vehicle.marca_model,
+                departament=req.vehicle.departament,
+            )
+            if req.vehicle is not None
+            else None
+        )
+        payload = StandaloneBonPayload(
+            date=req.date,
+            doc_number=req.doc_number,
+            gestiune=req.gestiune,
+            departament=req.departament,
+            vehicle=target_veh,
+            items=items,
+            deduct_from_stock=req.deduct_from_stock,
+        )
+        res = export_standalone_bon_consum(payload, export_dir=EXPORT_DIR, db_path=DB_PATH)
+        return StandaloneBonResponseOut(
+            doc_number=res.doc_number,
+            archive_dir=res.archive_dir,
+            bon_cons_path=res.bon_cons_path,
+            lines_written=res.lines_written,
+            total_valoare=res.total_valoare,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e

@@ -9,6 +9,8 @@ import {
   uploadVehicleFile,
   seedExcelFile,
   submitExport,
+  extractWinmentorDocNr,
+  canonicalSupplierToken,
 } from './api'
 
 import VehiclesPanel, { type PendingTalonJob } from './components/VehiclesPanel.vue'
@@ -17,8 +19,12 @@ import InvoiceStagingPanel, {
   type QuoteQueueItem,
   type StagedRow,
 } from './components/InvoiceStagingPanel.vue'
+import BonConsumPanel from './components/BonConsumPanel.vue'
 import DocumentViewerPanel from './components/DocumentViewerPanel.vue'
 import ModalsManager from './components/ModalsManager.vue'
+
+// --- Active Top Navigation Tab ---
+const activeTab = ref<'invoices' | 'bon_consum'>('invoices')
 
 // --- Global UI Banners & Modals ---
 const busyMessage = ref<string | null>(null)
@@ -86,26 +92,11 @@ const nextReadyQuote = computed<QuoteQueueItem | null>(() => {
   return list.find((q) => q.id !== activeQueueId.value && q.state === 'ready') ?? null
 })
 
-function canonicalSupplierToken(sup: string): string {
-  let compact = sup
-    .normalize('NFKD')
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '')
-  if (compact.startsWith('SC') && compact.length > 4) compact = compact.slice(2)
-  for (const sfx of ['SRL', 'SNC', 'SCS', 'SA']) {
-    if (compact.endsWith(sfx) && compact.length > sfx.length + 2) {
-      compact = compact.slice(0, -sfx.length)
-      break
-    }
-  }
-  return compact.slice(0, 12)
-}
-
 const duplicateQueueTab = computed<QuoteQueueItem | null>(() => {
   const cur = currentQuote.value
   if (!cur.supplierName || !cur.documentCode) return null
   const curSup = canonicalSupplierToken(cur.supplierName)
-  const curNr = cur.documentCode.replace(/^0+/, '') || '0'
+  const curNr = extractWinmentorDocNr(cur.documentCode)
   if (!curSup) return null
 
   return (
@@ -115,7 +106,7 @@ const duplicateQueueTab = computed<QuoteQueueItem | null>(() => {
         other.supplierName &&
         other.documentCode &&
         canonicalSupplierToken(other.supplierName) === curSup &&
-        (other.documentCode.replace(/^0+/, '') || '0') === curNr
+        extractWinmentorDocNr(other.documentCode) === curNr
     ) ?? null
   )
 })
@@ -132,7 +123,7 @@ function copyText(text: string, label: string) {
   showToast(`Copied ${label}: ${text}`)
 }
 
-// --- Bulk Talon Cropping & Background Extraction (Point 1) ---
+// --- Bulk Talon Cropping & Background Extraction ---
 
 async function handleTalonFilesSelected(files: File[]) {
   if (files.length === 0) return
@@ -172,11 +163,9 @@ function handleConfirmTalonCrop(payload: {
   blob: Blob
   dataUrl: string
 }) {
-  // 1. Remove from the cropping modal queue immediately so the next Talon opens with zero wait
   const idx = talonCropQueue.value.findIndex((t) => t.id === payload.item.id)
   if (idx !== -1) removeTalonCropItem(idx)
 
-  // 2. Add to the background Gemini OCR job list in the left panel
   const job: PendingTalonJob = {
     id: payload.item.id,
     fileName: payload.item.fileName,
@@ -186,7 +175,6 @@ function handleConfirmTalonCrop(payload: {
   }
   pendingTalonJobs.value.push(job)
 
-  // 3. Fire Gemini extraction in the background without blocking the operator
   void runTalonOcrJob(job, payload.dataUrl, payload.item.scannedFullUrl)
 }
 
@@ -294,7 +282,6 @@ async function processQuoteQueue() {
       try {
         const data = await uploadQuoteFile(nextItem.file)
         nextItem.supplierName = data.supplier_name
-        // Pre-format directly to the trailing 6-digit WinMentor invoice number (Point 5 & Point 7)
         nextItem.documentCode = data.winmentor_doc_nr || data.document_code
         nextItem.quoteDate = data.quote_date
         nextItem.validationIssues = data.validation_issues
@@ -359,7 +346,7 @@ function clearExportedFromQueue() {
 
 function openQuotePreview(q: QuoteQueueItem) {
   if (!q.previewPages || q.previewPages.length === 0) return
-  viewerTitle.value = `${q.supplierName || q.fileName} (#${q.documentCode})`
+  viewerTitle.value = `${q.supplierName || q.fileName} (#${extractWinmentorDocNr(q.documentCode)})`
   viewerPages.value = q.previewPages
   showDocViewer.value = true
 }
@@ -491,6 +478,24 @@ async function handleExport(advanceToNext: boolean) {
       </div>
     </header>
 
+    <!-- Workspace Mode Tabs -->
+    <nav class="mode-tabs">
+      <button
+        class="mode-tab-btn"
+        :class="{ 'mode-tab-active': activeTab === 'invoices' }"
+        @click="activeTab = 'invoices'"
+      >
+        📥 1. Recepție Facturi (Facturi Intrare)
+      </button>
+      <button
+        class="mode-tab-btn"
+        :class="{ 'mode-tab-active': activeTab === 'bon_consum' }"
+        @click="activeTab = 'bon_consum'"
+      >
+        📤 2. Eliberare Bon de Consum (Direct din Stoc)
+      </button>
+    </nav>
+
     <div v-if="busyMessage" class="banner banner-info">{{ busyMessage }}</div>
     <div v-if="errorMessage" class="banner banner-error">
       <span>{{ errorMessage }}</span>
@@ -498,8 +503,9 @@ async function handleExport(advanceToNext: boolean) {
     </div>
     <div v-if="toastMessage" class="toast">{{ toastMessage }}</div>
 
-    <!-- Modular 3-Panel Workspace -->
-    <main class="workspace" :class="{ 'workspace-with-viewer': showDocViewer }">
+    <!-- Modular Workspace -->
+    <main class="workspace" :class="{ 'workspace-with-viewer': showDocViewer && activeTab === 'invoices' }">
+      <!-- Vehicles panel is always visible on the left for both modes -->
       <VehiclesPanel
         :vehicles="vehicles"
         :pending-jobs="pendingTalonJobs"
@@ -512,7 +518,9 @@ async function handleExport(advanceToNext: boolean) {
         @remove-job="handleRemoveTalonJob"
       />
 
+      <!-- Tab 1: Invoice Staging Panel -->
       <InvoiceStagingPanel
+        v-if="activeTab === 'invoices'"
         :quote-queue="quoteQueue"
         :active-queue-id="activeQueueId"
         :current-quote="currentQuote"
@@ -529,8 +537,18 @@ async function handleExport(advanceToNext: boolean) {
         @copy-text="copyText"
       />
 
+      <!-- Tab 2: Dedicated Bon de Consum Panel -->
+      <BonConsumPanel
+        v-else
+        :vehicles="vehicles"
+        :quote-queue="quoteQueue"
+        @toast="showToast"
+        @error="(msg) => (errorMessage = msg)"
+      />
+
+      <!-- Document Split Viewer (Invoice Mode) -->
       <DocumentViewerPanel
-        v-if="showDocViewer"
+        v-if="showDocViewer && activeTab === 'invoices'"
         :title="viewerTitle"
         :pages="viewerPages"
         @close="showDocViewer = false"
