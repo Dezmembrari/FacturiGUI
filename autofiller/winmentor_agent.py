@@ -20,7 +20,8 @@ BASE_DIR: Path = (
 )
 
 ASSETS_DIR: Path = BASE_DIR / "assets"
-CONFIDENCE: float = 0.85  # OpenCV template matching threshold
+DEBUG_DIR: Path = BASE_DIR / "debug_vision"
+CONFIDENCE: float = 0.8  # Lowered slightly to 0.8 to handle minor font smoothing differences
 
 
 class WindowProtocol(Protocol):
@@ -52,30 +53,61 @@ class AutoFillPayload(BaseModel):
 
 # --- Core Vision Helpers ---
 
+def take_debug_screenshot(failed_img_name: str) -> None:
+    """Takes a full screenshot to show exactly what the bot sees when it fails."""
+    try:
+        DEBUG_DIR.mkdir(exist_ok=True)
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        safe_name = failed_img_name.replace(".png", "").replace(".jpg", "")
+        filepath = DEBUG_DIR / f"FAILED_{safe_name}_{timestamp}.png"
+        pyautogui.screenshot(str(filepath))
+        print(f"\n[📸 VISUAL DEBUGGER] I couldn't find '{failed_img_name}'.")
+        print(f"I took a screenshot of what I currently see. Open this file to debug:")
+        print(f"--> {filepath}\n")
+    except Exception as e:
+        print(f"[!] Could not save debug screenshot: {e}")
+
+
 def focus_winmentor() -> bool:
     """Finds WinMentor, maximizes it, and forces it to the foreground."""
+    print(f"[DEBUG] Current Screen Resolution recognized by bot: {pyautogui.size()}")
+    
     # Force cast the untyped OS return to List[Any] to satisfy Pylance
     raw_windows = cast(List[Any], gw.getAllWindows())
     windows: List[WindowProtocol] = []
     
     for w in raw_windows:
-        if "WINMENTOR" in str(getattr(w, "title", "")).upper():
+        title = str(getattr(w, "title", ""))
+        if "WINMENTOR" in title.upper():
             windows.append(cast(WindowProtocol, w))
+            print(f"[DEBUG] Found WinMentor Window: '{title}'")
             
     if not windows:
+        print("[!] WinMentor window not found in the active process list.")
         return False
 
     win = windows[0]
     
-    if win.isMinimized:
-        win.restore()
+    try:
+        if win.isMinimized:
+            print("[DEBUG] WinMentor is minimized. Attempting to restore...")
+            win.restore()
+            time.sleep(0.5)
+            
+        # Force maximization so UI elements are never hidden off-screen
+        if not getattr(win, "isMaximized", True):
+            print("[DEBUG] WinMentor is not maximized. Maximizing now...")
+            win.maximize()
+            time.sleep(0.5)
+            
+        print("[DEBUG] Activating window...")
+        # Bypassing Windows 10 Foreground Lock Timeout by sending a dummy Alt keystroke
+        pyautogui.press('alt')
+        win.activate()
+        time.sleep(0.8)  # Wait slightly longer for the Windows maximize animation to finish
+    except Exception as e:
+        print(f"[!] Minor error during window activation: {e}")
         
-    # Force maximization so UI elements are never hidden off-screen
-    if not getattr(win, "isMaximized", True):
-        win.maximize()
-        
-    win.activate()
-    time.sleep(0.8)  # Wait slightly longer for the Windows maximize animation to finish
     return True
 
 
@@ -83,7 +115,7 @@ def locate_image(img_name: str, timeout: float = 0.0) -> tuple[int, int] | None:
     """Scans the screen for an asset, returning (x, y) coordinates."""
     img_path = str(ASSETS_DIR / img_name)
     if not os.path.exists(img_path):
-        print(f"[!] Asset missing: {img_path}")
+        print(f"[!] Asset missing from folder: {img_path}")
         return None
 
     start_time = time.time()
@@ -106,6 +138,7 @@ def click_image(
     """Waits for an image, moves the mouse with an offset, and clicks."""
     pos = locate_image(img_name, timeout=timeout)
     if pos is None:
+        take_debug_screenshot(img_name)
         raise TimeoutError(f"Could not find {img_name} on screen after {timeout} seconds.")
 
     pyautogui.moveTo(pos[0] + offset_x, pos[1] + offset_y, duration=0.2)
@@ -130,6 +163,7 @@ def add_grid_items(items: list[dict[str, Any]]) -> None:
         # 1. Open the Catalog
         click_image("btn_plus_grid.png")
         if not locate_image("title_articole.png", timeout=5.0):
+            take_debug_screenshot("title_articole.png")
             raise TimeoutError("Articole window did not open.")
 
         # 2. Search for the part
@@ -150,6 +184,7 @@ def add_grid_items(items: list[dict[str, Any]]) -> None:
             # Click add new article (Uses your consolidated + Adaug button)
             click_image("btn_adaug_general.png")
             if not locate_image("anchor_denumire_nou.png", timeout=5.0):
+                take_debug_screenshot("anchor_denumire_nou.png")
                 raise TimeoutError("Articole de stoc definition window did not open.")
 
             # Fill Denumire (Offset X+100 right of the anchor)
@@ -265,6 +300,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print(" 🤖 WinMentor Auto-Filler Agent is ONLINE")
     print(f" 📂 Assets Directory: {ASSETS_DIR}")
+    print(f" 📂 Vision Debug Folder: {DEBUG_DIR}")
     print(" 🛑 EMERGENCY STOP: Slam your mouse into any corner of your screen.")
     print("=" * 60)
     uvicorn.run(app, host="127.0.0.1", port=8001)
