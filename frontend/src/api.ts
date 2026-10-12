@@ -142,6 +142,7 @@ export interface ExportResponse {
   invoice_lines_written: number
   consumption_vouchers_written: number
   nomenclature_updated: number
+  export_bundle: Record<string, any>
 }
 
 export interface StandaloneBonItemPayload {
@@ -173,6 +174,7 @@ export interface StandaloneBonResponse {
   bon_cons_path: string
   lines_written: number
   total_valoare: number
+  export_bundle: Record<string, any>
 }
 
 /**
@@ -336,4 +338,19 @@ export async function submitStandaloneBonConsum(
     body: JSON.stringify(payload),
   })
   return handleResponse<StandaloneBonResponse>(res)
+}
+
+/**
+ * Pings the local Windows PC (Auto-Filler agent) with the exported JSON bundle
+ * so it immediately takes over the mouse/keyboard and types the data into WinMentor.
+ */
+export async function triggerLocalAutoFill(payload: Record<string, any>): Promise<void> {
+  const res = await fetch('http://localhost:8001/autofill', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    throw new Error(`WinMentor Auto-Filler rejected request: HTTP ${res.status}`)
+  }
 }

@@ -6,6 +6,7 @@ import {
   type PartRecord,
   fetchStockList,
   submitStandaloneBonConsum,
+  triggerLocalAutoFill,
 } from '../api'
 import type { QuoteQueueItem } from './InvoiceStagingPanel.vue'
 
@@ -29,9 +30,9 @@ const bonDate = ref<string>(new Date().toISOString().slice(0, 10))
 const bonDocNr = ref<string>('1')
 const bonGestiune = ref<string>('MAGAZIE')
 const deductFromStock = ref<boolean>(true)
+const autoFillWinmentor = ref<boolean>(true)
 const isExporting = ref<boolean>(false)
 
-// --- Cart Items on this Bon de Consum ---
 export interface BonCartItem {
   id: string
   part_code: string
@@ -44,7 +45,6 @@ export interface BonCartItem {
 
 const cart = ref<BonCartItem[]>([])
 
-// --- Warehouse Stock Browser State ---
 const stockSearch = ref<string>('')
 const onlyInStock = ref<boolean>(true)
 const stockItems = ref<PartRecord[]>([])
@@ -62,7 +62,6 @@ const hasOverdrawError = computed(() =>
   cart.value.some((item) => item.quantity > item.stoc_disponibil && item.stoc_disponibil > 0)
 )
 
-// Computed key to match staged invoice destinations (e.g., 'car:car_123' or 'dept:VOPSITORIE')
 const currentTargetKey = computed(() => {
   if (targetType.value === 'vehicle' && selectedVehicleId.value) {
     return `car:${selectedVehicleId.value}`
@@ -72,7 +71,6 @@ const currentTargetKey = computed(() => {
   return ''
 })
 
-// Finds all parts in the Invoice Staging queue that are assigned to the currently selected vehicle
 const stagedFromQuotes = computed(() => {
   const items: { code: string; name: string; qty: number; invoice: string; state: string }[] = []
   if (!currentTargetKey.value) return items
@@ -119,7 +117,6 @@ function addToCart(part: PartRecord) {
     return
   }
 
-  // Calculate unit price from remaining sold value
   const estimatedUnitPrice =
     part.stoc > 0 ? Number((part.sold / part.stoc).toFixed(4)) : 0
 
@@ -175,8 +172,18 @@ async function handleGenerateBon() {
       'toast',
       `Exported Bon de Consum #${res.doc_number} (${res.lines_written} items, ${res.total_valoare.toFixed(2)} RON)!`
     )
+
+    if (autoFillWinmentor.value) {
+      emit('toast', 'Pinging WinMentor Auto-Filler...')
+      try {
+        await triggerLocalAutoFill(res.export_bundle)
+        emit('toast', 'WinMentor Auto-Fill Triggered!')
+      } catch (err) {
+        emit('error', 'Auto-Filler agent not running on this PC. Start winmentor_agent.py.')
+      }
+    }
+
     clearCart()
-    // Refresh warehouse stock list to reflect the deducted items
     await loadStock()
   } catch (err) {
     emit('error', err instanceof Error ? err.message : String(err))
@@ -188,7 +195,6 @@ async function handleGenerateBon() {
 
 <template>
   <section class="panel bon-consum-panel">
-    <!-- Header Controls -->
     <div class="panel-header">
       <div>
         <h2>📤 Eliberare Bon de Consum (Direct din Stoc)</h2>
@@ -198,7 +204,6 @@ async function handleGenerateBon() {
       </div>
     </div>
 
-    <!-- Target Selector & Voucher Details Bar (Fixed Grid Layout) -->
     <div class="bon-header-grid">
       <div class="field">
         <label>Tip Destinație</label>
@@ -220,7 +225,6 @@ async function handleGenerateBon() {
         </div>
       </div>
 
-      <!-- Pick Vehicle Target -->
       <div v-if="targetType === 'vehicle'" class="field flex-1">
         <label>Selectează Mașina</label>
         <select v-model="selectedVehicleId">
@@ -233,7 +237,6 @@ async function handleGenerateBon() {
         </select>
       </div>
 
-      <!-- Pick Department Target -->
       <div v-else class="field flex-1">
         <label>Departament Consumator</label>
         <select v-model="selectedDept">
@@ -259,11 +262,8 @@ async function handleGenerateBon() {
       </div>
     </div>
 
-    <!-- 2-Column Split: Cart on Left, Stock Browser on Right -->
     <div class="bon-workspace-split">
-      <!-- Left Column: The Consumption Voucher Cart -->
       <div class="bon-cart-col">
-        <!-- Read-Only Preview of Parts Assigned Directly From Invoices (Express Flow) -->
         <div v-if="stagedFromQuotes.length > 0" class="staged-quotes-box">
           <div class="staged-quotes-title">
             <strong>📦 Piese alocate direct din Facturi (Auto-Bon)</strong>
@@ -395,10 +395,16 @@ async function handleGenerateBon() {
             </span>
           </div>
 
-          <label class="checkbox-label">
-            <input v-model="deductFromStock" type="checkbox" />
-            Scade automat cantitățile din stocul magaziei
-          </label>
+          <div style="display: flex; gap: 1rem; align-items: center;">
+            <label class="checkbox-label" style="color: #2563eb;">
+              <input v-model="autoFillWinmentor" type="checkbox" />
+              🤖 Auto-Type in WinMentor
+            </label>
+            <label class="checkbox-label">
+              <input v-model="deductFromStock" type="checkbox" />
+              Scade din stocul Magaziei
+            </label>
+          </div>
 
           <button
             class="btn btn-success"

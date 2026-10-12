@@ -11,6 +11,7 @@ import {
   submitExport,
   extractWinmentorDocNr,
   canonicalSupplierToken,
+  triggerLocalAutoFill,
 } from './api'
 
 import VehiclesPanel, { type PendingTalonJob } from './components/VehiclesPanel.vue'
@@ -31,6 +32,7 @@ const busyMessage = ref<string | null>(null)
 const errorMessage = ref<string | null>(null)
 const toastMessage = ref<string | null>(null)
 const activeModal = ref<'stock' | 'models' | 'history' | null>(null)
+const autoFillWinmentor = ref<boolean>(true)
 
 // --- Active Vehicles & Bulk Talon Cropping/Extraction Queue ---
 const vehicles = ref<VehicleTarget[]>([])
@@ -442,6 +444,16 @@ async function handleExport(advanceToNext: boolean) {
     q.duplicateWarning = null
     showToast(`Exported WinMentor Factura #${res.winmentor_doc_nr}!`)
 
+    if (autoFillWinmentor.value) {
+      showToast('Pinging WinMentor Auto-Filler...')
+      try {
+        await triggerLocalAutoFill(res.export_bundle)
+        showToast('WinMentor Auto-Fill Triggered!')
+      } catch (err) {
+        errorMessage.value = 'Auto-Filler agent not running on this PC. Start winmentor_agent.py.'
+      }
+    }
+
     if (advanceToNext && nextReadyQuote.value) {
       activeQueueId.value = nextReadyQuote.value.id
     }
@@ -502,6 +514,13 @@ async function handleExport(advanceToNext: boolean) {
       <button class="btn-close" @click="errorMessage = null">×</button>
     </div>
     <div v-if="toastMessage" class="toast">{{ toastMessage }}</div>
+
+    <div v-if="activeTab === 'invoices'" class="autofill-toggle-bar">
+      <label class="checkbox-label" style="color: #1d4ed8;">
+        <input v-model="autoFillWinmentor" type="checkbox" />
+        🤖 Auto-Type generated exports into WinMentor locally
+      </label>
+    </div>
 
     <!-- Modular Workspace -->
     <main class="workspace" :class="{ 'workspace-with-viewer': showDocViewer && activeTab === 'invoices' }">
@@ -574,3 +593,13 @@ async function handleExport(advanceToNext: boolean) {
     />
   </div>
 </template>
+
+<style scoped>
+.autofill-toggle-bar {
+  background: #e0f2fe;
+  padding: 0.5rem 1.5rem;
+  border-bottom: 1px solid #bae6fd;
+  display: flex;
+  justify-content: flex-end;
+}
+</style>

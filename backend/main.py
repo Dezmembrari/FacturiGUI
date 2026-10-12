@@ -2,6 +2,8 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any
+from fastapi.staticfiles import StaticFiles
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -216,6 +218,7 @@ class ExportResponseOut(BaseModel):
     invoice_lines_written: int
     consumption_vouchers_written: int
     nomenclature_updated: int
+    export_bundle: dict[str, Any]
 
 
 class RetriggerRequestIn(BaseModel):
@@ -252,6 +255,7 @@ class StandaloneBonResponseOut(BaseModel):
     bon_cons_path: str
     lines_written: int
     total_valoare: float
+    export_bundle: dict[str, Any]
 
 
 # --- Helpers -----------------------------------------------------------------------------
@@ -572,6 +576,7 @@ def export_invoice(req: ExportRequestIn) -> ExportResponseOut:
             invoice_lines_written=result.invoice_lines_written,
             consumption_vouchers_written=result.consumption_vouchers_written,
             nomenclature_updated=result.nomenclature_updated,
+            export_bundle=result.bundle_data,
         )
     except ValueError as e:
         msg = str(e)
@@ -641,8 +646,14 @@ def export_bon_consum_standalone(req: StandaloneBonRequestIn) -> StandaloneBonRe
             bon_cons_path=res.bon_cons_path,
             lines_written=res.lines_written,
             total_valoare=res.total_valoare,
+            export_bundle=res.bundle_data,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+# Serve compiled Vue production assets if available
+dist_path = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if dist_path.exists():
+    app.mount("/", StaticFiles(directory=str(dist_path), html=True), name="static_frontend")

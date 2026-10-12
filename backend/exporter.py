@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Any, TypedDict
 
 from nomenclature import (
     DEFAULT_DB_PATH,
@@ -45,6 +46,28 @@ KNOWN_SUPPLIER_CIFS: dict[str, str] = {
     "AUTOMOTIVE REFINISH": "RO31158435",
     "MARCOS SERV": "RO33841085",
 }
+
+
+# --- Strictly Typed Dictionaries for JSON Bundles ---
+
+class BonItemDict(TypedDict):
+    part_code: str
+    part_name: str
+    um: str
+    quantity: float
+    unit_price: float
+    valoare: float
+
+
+class BonConsumDict(TypedDict):
+    bon_index: int
+    serie_carnet: str
+    data: str
+    gestiune: str
+    cine_consuma: str
+    observatii: str
+    total_valoare: float
+    items: list[BonItemDict]
 
 
 @dataclass(frozen=True)
@@ -100,6 +123,7 @@ class ExportResult:
     invoice_lines_written: int
     consumption_vouchers_written: int
     nomenclature_updated: int
+    bundle_data: dict[str, Any]
 
 
 # --- Formatting & WinMentor Convention Helpers -------------------------------------------
@@ -262,7 +286,7 @@ def build_fact_int_content(
 
 def build_bon_cons_content(
     payload: ExportInvoicePayload,
-) -> tuple[str | None, list[dict[str, object]]]:
+) -> tuple[str | None, list[BonConsumDict]]:
     """
     Groups non-stock allocations into Consumption Vouchers (`Bon consum`):
     - If `a.vehicle` is set: grouped by that specific car (`Observatii` = 'opel corsa ct61mlg').
@@ -300,7 +324,7 @@ def build_bon_cons_content(
         f"TotalBonuri={len(by_target)}",
     ]
 
-    vouchers_meta: list[dict[str, object]] = []
+    vouchers_meta: list[BonConsumDict] = []
 
     for bon_idx, ((dept, obs), items_for_target) in enumerate(by_target.items(), start=1):
         lines.extend(
@@ -317,7 +341,7 @@ def build_bon_cons_content(
                 f"[Items_{bon_idx}]",
             ]
         )
-        voucher_items: list[dict[str, object]] = []
+        voucher_items: list[BonItemDict] = []
         for item_idx, item in enumerate(items_for_target, start=1):
             code = normalize_code(item.part_code)
             name = _ascii_clean(item.part_name).upper()
@@ -328,28 +352,28 @@ def build_bon_cons_content(
                 f"{item.quantity:g};{item.unit_price:.4f};{obs}"
             )
             voucher_items.append(
-                {
-                    "part_code": code,
-                    "part_name": name,
-                    "um": um,
-                    "quantity": round(item.quantity, 4),
-                    "unit_price": round(item.unit_price, 4),
-                    "valoare": val,
-                }
+                BonItemDict(
+                    part_code=code,
+                    part_name=name,
+                    um=um,
+                    quantity=round(item.quantity, 4),
+                    unit_price=round(item.unit_price, 4),
+                    valoare=val,
+                )
             )
         vouchers_meta.append(
-            {
-                "bon_index": bon_idx,
-                "serie_carnet": "TOP",
-                "data": wm_date,
-                "gestiune": gestiune,
-                "cine_consuma": dept,
-                "observatii": obs,
-                "total_valoare": round(
+            BonConsumDict(
+                bon_index=bon_idx,
+                serie_carnet="TOP",
+                data=wm_date,
+                gestiune=gestiune,
+                cine_consuma=dept,
+                observatii=obs,
+                total_valoare=round(
                     sum(round(i.quantity * i.unit_price, 2) for i in items_for_target), 2
                 ),
-                "items": voucher_items,
-            }
+                items=voucher_items,
+            )
         )
 
     return "\r\n".join(lines) + "\r\n", vouchers_meta
@@ -412,7 +436,7 @@ def export_to_winmentor(
     total_fara_tva = round(sum(line.valoare_fara_tva for line in inv_lines), 2)
     total_tva = round(sum(line.valoare_tva for line in inv_lines), 2)
 
-    bundle_data: dict[str, object] = {
+    bundle_data: dict[str, Any] = {
         "factura_intrare": {
             "furnizor": _ascii_clean(payload.supplier_name).upper(),
             "cod_furnizor": _resolve_supplier_cif(
@@ -473,6 +497,7 @@ def export_to_winmentor(
         invoice_lines_written=len(inv_lines),
         consumption_vouchers_written=len(vouchers_meta),
         nomenclature_updated=len(unique_parts),
+        bundle_data=bundle_data,
     )
 
 
@@ -536,6 +561,7 @@ class StandaloneBonResult:
     bon_cons_path: str
     lines_written: int
     total_valoare: float
+    bundle_data: dict[str, Any]
 
 
 def export_standalone_bon_consum(
@@ -590,16 +616,44 @@ def export_standalone_bon_consum(
         "[Items_1]",
     ]
 
+    voucher_items: list[BonItemDict] = []
     for idx, item in enumerate(payload.items, start=1):
         code = normalize_code(item.part_code)
         name = _ascii_clean(item.part_name).upper()
         um = _ascii_clean(item.um) or DEFAULT_UM
+        val = round(item.quantity * item.unit_price, 2)
         lines.append(
             f"Item_{idx}={code};{name};{um};"
             f"{item.quantity:g};{item.unit_price:.4f};{obs}"
         )
+        voucher_items.append(
+            BonItemDict(
+                part_code=code,
+                part_name=name,
+                um=um,
+                quantity=round(item.quantity, 4),
+                unit_price=round(item.unit_price, 4),
+                valoare=val,
+            )
+        )
 
     bon_content = "\r\n".join(lines) + "\r\n"
+
+    bon_dict = BonConsumDict(
+        bon_index=1,
+        serie_carnet="TOP",
+        data=wm_date,
+        gestiune=gestiune,
+        cine_consuma=dept,
+        observatii=obs,
+        total_valoare=total_val,
+        items=voucher_items,
+    )
+
+    bundle_data: dict[str, Any] = {
+        "bonuri_consum": [bon_dict]
+    }
+    bundle_bytes = json.dumps(bundle_data, indent=2, ensure_ascii=False).encode("utf-8")
 
     target_slug = (
         re.sub(r"[^A-Z0-9]+", "_", obs.upper())
@@ -613,9 +667,14 @@ def export_standalone_bon_consum(
     )
     archive_dir.mkdir(parents=True, exist_ok=True)
 
+    arch_bundle = archive_dir / "export_bundle.json"
     arch_bon = archive_dir / "BON_CONS.TXT"
+    root_bundle = root_dir / "latest_export.json"
     root_bon = root_dir / "BON_CONS.TXT"
+
+    arch_bundle.write_bytes(bundle_bytes)
     arch_bon.write_bytes(bon_content.encode("utf-8"))
+    root_bundle.write_bytes(bundle_bytes)
     root_bon.write_bytes(bon_content.encode("utf-8"))
 
     if payload.deduct_from_stock:
@@ -629,4 +688,5 @@ def export_standalone_bon_consum(
         bon_cons_path=str(root_bon),
         lines_written=len(payload.items),
         total_valoare=total_val,
+        bundle_data=bundle_data,
     )

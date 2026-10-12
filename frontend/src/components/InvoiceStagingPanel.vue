@@ -7,6 +7,8 @@ import {
   type ExportLogEntry,
   type ExportResponse,
   searchNomenclature,
+  canonicalSupplierToken,
+  extractWinmentorDocNr,
 } from '../api'
 
 export interface StagedRow {
@@ -83,32 +85,6 @@ const queueStats = computed(() => {
   ).length
   return { total, exported, pending }
 })
-
-function canonicalSupplierToken(sup: string): string {
-  let compact = sup
-    .normalize('NFKD')
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '')
-  if (compact.startsWith('SC') && compact.length > 4) compact = compact.slice(2)
-  for (const sfx of ['SRL', 'SNC', 'SCS', 'SA']) {
-    if (compact.endsWith(sfx) && compact.length > sfx.length + 2) {
-      compact = compact.slice(0, -sfx.length)
-      break
-    }
-  }
-  return compact.slice(0, 12)
-}
-
-function extractWinmentorDocNr(docCode: string): string {
-  const cleaned = docCode.trim().toUpperCase()
-  if (/^\d{1,7}$/.test(cleaned)) return cleaned
-  const matches = cleaned.match(/\d+/g)
-  if (!matches || matches.length === 0) return cleaned
-  const last = matches[matches.length - 1]
-  if (last.length > 6 && last.startsWith('00')) return last.replace(/^0+/, '') || '0'
-  if (last.length > 6) return last.slice(-6)
-  return last
-}
 
 // Tracks all tab IDs that appear 2+ times in the active queue (Yellow highlight)
 const queueDuplicateIds = computed<Set<string>>(() => {
@@ -395,7 +371,7 @@ async function runLiveSearch() {
         <div>
           <strong>⚠️ Duplicate Invoice in Active Queue:</strong>
           This invoice ({{ currentQuote.supplierName }}
-          <code>#{{ currentQuote.documentCode }}</code>) matches queued tab
+          <code>#{{ extractWinmentorDocNr(currentQuote.documentCode) }}</code>) matches queued tab
           <strong>{{ duplicateQueueTab.fileName }}</strong> ({{
             duplicateQueueTab.supplierName
           }}).
@@ -443,7 +419,7 @@ async function runLiveSearch() {
             />
             <button
               class="btn btn-secondary btn-xs"
-              @click="emit('copy-text', currentQuote.documentCode, 'Numar Factura')"
+              @click="emit('copy-text', extractWinmentorDocNr(currentQuote.documentCode), 'Numar Factura')"
             >
               Copy
             </button>
@@ -484,7 +460,7 @@ async function runLiveSearch() {
         </div>
       </div>
 
-      <!-- Parts Table (Fits 100% Width + Multi-Line Wrapping Article Name) -->
+      <!-- Parts Table (Fits 100% Width + Auto-Growing Article Name) -->
       <div class="table-container">
         <table class="parts-table parts-table-fit">
           <colgroup>
