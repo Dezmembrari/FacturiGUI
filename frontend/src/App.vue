@@ -34,6 +34,12 @@ const toastMessage = ref<string | null>(null)
 const activeModal = ref<'stock' | 'models' | 'history' | null>(null)
 const autoFillWinmentor = ref<boolean>(true)
 
+// --- Export Modal State ---
+const showDuplicateModal = ref(false)
+const pendingExportAdvance = ref(false)
+const duplicateModalSupplier = ref('')
+const duplicateModalDocNr = ref('')
+
 // --- Active Vehicles & Bulk Talon Cropping/Extraction Queue ---
 const vehicles = ref<VehicleTarget[]>([])
 const talonCropQueue = ref<TalonCropQueueItem[]>([])
@@ -439,6 +445,10 @@ async function handleExport(advanceToNext: boolean) {
       allocations,
     })
 
+    // Reset override flag on success
+    q.allowDuplicateOverride = false
+    showDuplicateModal.value = false
+
     q.exportResult = res
     q.state = 'exported'
     q.duplicateWarning = null
@@ -457,10 +467,33 @@ async function handleExport(advanceToNext: boolean) {
     if (advanceToNext && nextReadyQuote.value) {
       activeQueueId.value = nextReadyQuote.value.id
     }
-  } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : String(err)
+  } catch (err: any) {
+    const msg = err instanceof Error ? err.message : String(err)
+    // Check if the backend screams "Duplicate" or 409
+    if (msg.includes('409') || msg.toLowerCase().includes('duplicate')) {
+      duplicateModalSupplier.value = q.supplierName
+      duplicateModalDocNr.value = extractWinmentorDocNr(q.documentCode)
+      pendingExportAdvance.value = advanceToNext
+      showDuplicateModal.value = true
+    } else {
+      errorMessage.value = msg
+    }
   } finally {
     busyMessage.value = null
+  }
+}
+
+function confirmForceExport() {
+  if (currentQuote.value) {
+    currentQuote.value.allowDuplicateOverride = true
+    handleExport(pendingExportAdvance.value)
+  }
+}
+
+function cancelForceExport() {
+  showDuplicateModal.value = false
+  if (currentQuote.value) {
+    currentQuote.value.allowDuplicateOverride = false
   }
 }
 </script>
@@ -591,6 +624,43 @@ async function handleExport(advanceToNext: boolean) {
       @toast="showToast"
       @error="(msg) => (errorMessage = msg)"
     />
+
+    <!-- Duplicate Warning Modal -->
+    <div
+      v-if="showDuplicateModal"
+      class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50"
+    >
+      <div class="bg-white p-6 rounded-lg shadow-xl max-w-md w-full border border-red-200">
+        <h3 class="text-xl font-bold text-red-600 mb-2 flex items-center gap-2">
+          <span class="text-2xl">⚠️</span> Duplicate Detected
+        </h3>
+        
+        <p class="mb-4 text-gray-700">
+          The invoice from <strong>{{ duplicateModalSupplier }}</strong> 
+          (Nr. <code>#{{ duplicateModalDocNr }}</code>) has already been exported to WinMentor. 
+        </p>
+        <p class="mb-6 text-gray-600 text-sm">
+          Exporting it again will create duplicate entries in your database and WinMentor. Are you sure you want to proceed?
+        </p>
+        
+        <div class="flex justify-end space-x-3">
+          <button
+            @click="cancelForceExport"
+            class="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 font-medium transition-colors"
+          >
+            Cancel
+          </button>
+          
+          <button
+            @click="confirmForceExport"
+            class="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 font-bold shadow-sm transition-colors"
+          >
+            Force Export
+          </button>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 

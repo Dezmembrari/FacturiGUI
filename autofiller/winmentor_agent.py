@@ -2,13 +2,13 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Dict, List, Optional, Protocol, cast
 
 import pyautogui  # type: ignore
 import pygetwindow as gw  # type: ignore
 from fastapi import BackgroundTasks, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # --- Safety & Vision Settings ---
 pyautogui.FAILSAFE = True
@@ -28,9 +28,11 @@ class WindowProtocol(Protocol):
 
     title: str
     isMinimized: bool
+    isMaximized: bool
 
     def restore(self) -> None: ...
     def activate(self) -> None: ...
+    def maximize(self) -> None: ...
 
 
 app = FastAPI(title="WinMentor Auto-Filler Agent")
@@ -43,26 +45,37 @@ app.add_middleware(
 
 
 class AutoFillPayload(BaseModel):
-    factura_intrare: dict[str, Any] | None = None
-    bonuri_consum: list[dict[str, Any]] = []
+    factura_intrare: Optional[Dict[str, Any]] = Field(default=None)
+    # Pylance throws a false positive on default_factory=list here, so we suppress it.
+    bonuri_consum: List[Dict[str, Any]] = Field(default_factory=list)  # type: ignore
 
 
 # --- Core Vision Helpers ---
 
 def focus_winmentor() -> bool:
-    """Finds WinMentor, unminimizes it, and forces it to the foreground."""
-    raw_windows = cast(list[WindowProtocol], gw.getAllWindows())
-    windows: list[WindowProtocol] = [
-        w for w in raw_windows if "WINMENTOR" in w.title.upper()
-    ]
+    """Finds WinMentor, maximizes it, and forces it to the foreground."""
+    # Force cast the untyped OS return to List[Any] to satisfy Pylance
+    raw_windows = cast(List[Any], gw.getAllWindows())
+    windows: List[WindowProtocol] = []
+    
+    for w in raw_windows:
+        if "WINMENTOR" in str(getattr(w, "title", "")).upper():
+            windows.append(cast(WindowProtocol, w))
+            
     if not windows:
         return False
 
     win = windows[0]
+    
     if win.isMinimized:
         win.restore()
+        
+    # Force maximization so UI elements are never hidden off-screen
+    if not getattr(win, "isMaximized", True):
+        win.maximize()
+        
     win.activate()
-    time.sleep(0.5)
+    time.sleep(0.8)  # Wait slightly longer for the Windows maximize animation to finish
     return True
 
 
@@ -122,7 +135,7 @@ def add_grid_items(items: list[dict[str, Any]]) -> None:
         # 2. Search for the part
         # Offset X by -40 to click left of the magnifying glass (inside the input)
         click_image("icon_lupa_search.png", offset_x=-40)
-        pyautogui.write(str(item["part_code"]), interval=0.02)
+        pyautogui.write(str(item.get("part_code", "")), interval=0.02)
 
         # Move down to select the first filtered result and hit enter
         pyautogui.press("down")
@@ -132,7 +145,7 @@ def add_grid_items(items: list[dict[str, Any]]) -> None:
 
         # 3. Smart Detection: Did the window close?
         if locate_image("title_articole.png", timeout=0.0):
-            print(f"[*] Part {item['part_code']} not found. Creating new article...")
+            print(f"[*] Part {item.get('part_code')} not found. Creating new article...")
 
             # Click add new article (Uses your consolidated + Adaug button)
             click_image("btn_adaug_general.png")
@@ -141,11 +154,11 @@ def add_grid_items(items: list[dict[str, Any]]) -> None:
 
             # Fill Denumire (Offset X+100 right of the anchor)
             click_image("anchor_denumire_nou.png", offset_x=100)
-            pyautogui.write(str(item["part_name"]).upper(), interval=0.02)
+            pyautogui.write(str(item.get("part_name", "")).upper(), interval=0.02)
 
             # Fill Cod Extern (Offset X+100 right of the anchor)
             click_image("anchor_cod_extern.png", offset_x=100)
-            pyautogui.write(str(item["part_code"]).upper(), interval=0.02)
+            pyautogui.write(str(item.get("part_code", "")).upper(), interval=0.02)
 
             # PAUSE: Wait for the operator to verify, add UM, and click Salvez manually
             wait_for_vanish("anchor_denumire_nou.png")
@@ -155,19 +168,20 @@ def add_grid_items(items: list[dict[str, Any]]) -> None:
             time.sleep(0.5)
 
         # 4. Fill Grid Quantities and Prices
-        pyautogui.write(str(item["quantity"]), interval=0.02)
+        pyautogui.write(str(item.get("quantity", 1)), interval=0.02)
         pyautogui.press("enter")
 
         # If it's a Factura, we also need to type the Price (Bon consum auto-calculates price)
-        if "unit_price" in item and float(item["unit_price"]) > 0:
-            pyautogui.write(str(item["unit_price"]), interval=0.02)
+        unit_price = item.get("unit_price", 0.0)
+        if unit_price and float(unit_price) > 0:
+            pyautogui.write(str(unit_price), interval=0.02)
             pyautogui.press("enter")
 
         time.sleep(0.2)
 
 
 def execute_factura_intrare(factura: dict[str, Any]) -> None:
-    print(f"[*] Starting Factura Intrare: {factura['furnizor']}")
+    print(f"[*] Starting Factura Intrare: {factura.get('furnizor')}")
 
     click_image("Intrari.png")
     click_image("Facturi.png")
@@ -177,15 +191,15 @@ def execute_factura_intrare(factura: dict[str, Any]) -> None:
 
     # Fill Header
     click_image("anchor_furnizor.png", offset_y=30)
-    pyautogui.write(str(factura["furnizor"]), interval=0.02)
+    pyautogui.write(str(factura.get("furnizor", "")), interval=0.02)
     pyautogui.press("enter")
     time.sleep(0.3)
 
     click_image("anchor_numar.png", offset_x=60)
-    pyautogui.write(str(factura["numar_doc_winmentor"]), interval=0.02)
+    pyautogui.write(str(factura.get("numar_doc_winmentor", "")), interval=0.02)
 
     click_image("anchor_data.png", offset_x=60)
-    pyautogui.write(str(factura["data_winmentor"]), interval=0.02)
+    pyautogui.write(str(factura.get("data_winmentor", "")), interval=0.02)
 
     # Run the item insertion loop
     raw_items = cast(list[dict[str, Any]], factura.get("items", []))

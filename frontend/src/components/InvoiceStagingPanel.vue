@@ -384,20 +384,6 @@ async function runLiveSearch() {
         </button>
       </div>
 
-      <!-- Duplicate in Database Warning -->
-      <div v-if="currentQuote.duplicateWarning" class="alert-box duplicate-box">
-        <div>
-          <strong>🛑 Duplicate Invoice Detected in DB:</strong>
-          {{ currentQuote.duplicateWarning.supplier_name }}
-          <code>#{{ currentQuote.duplicateWarning.winmentor_doc_nr }}</code> was already exported on
-          {{ currentQuote.duplicateWarning.exported_at }}.
-        </div>
-        <label class="checkbox-label">
-          <input v-model="currentQuote.allowDuplicateOverride" type="checkbox" />
-          Allow re-exporting this invoice anyway
-        </label>
-      </div>
-
       <div v-if="currentQuote.validationIssues.length" class="alert-box">
         <strong>Validation Warnings:</strong>
         <div v-for="(iss, i) in currentQuote.validationIssues" :key="i">• {{ iss }}</div>
@@ -703,10 +689,7 @@ async function runLiveSearch() {
         <div class="footer-actions">
           <button
             class="btn btn-success"
-            :disabled="
-              currentQuote.rows.length === 0 ||
-              (currentQuote.duplicateWarning !== null && !currentQuote.allowDuplicateOverride)
-            "
+            :disabled="currentQuote.rows.length === 0"
             @click="emit('export', false)"
           >
             Export Bundle & Save
@@ -718,10 +701,7 @@ async function runLiveSearch() {
           <button
             v-if="nextReadyQuote"
             class="btn btn-primary"
-            :disabled="
-              currentQuote.rows.length === 0 ||
-              (currentQuote.duplicateWarning !== null && !currentQuote.allowDuplicateOverride)
-            "
+            :disabled="currentQuote.rows.length === 0"
             @click="emit('export', true)"
           >
             Export & Next in Queue →

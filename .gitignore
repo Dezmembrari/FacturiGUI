@@ -211,6 +211,7 @@ __pycache__/
 
 # Local Database
 backend/nomenclature.db
+*.db
 
 # Generated Exports & Archives
 backend/exports/
