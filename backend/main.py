@@ -653,7 +653,20 @@ def export_bon_consum_standalone(req: StandaloneBonRequestIn) -> StandaloneBonRe
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
-# Serve compiled Vue production assets if available
-dist_path = Path(__file__).resolve().parent.parent / "frontend" / "dist"
-if dist_path.exists():
-    app.mount("/", StaticFiles(directory=str(dist_path), html=True), name="static_frontend")
+
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+if DIST_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    def serve_frontend(full_path: str):
+        # Serve favicon or direct static files if requested
+        target = DIST_DIR / full_path
+        if full_path and target.is_file():
+            return FileResponse(target)
+        # Fall back to index.html for Vue SPA routing
+        return FileResponse(DIST_DIR / "index.html")
