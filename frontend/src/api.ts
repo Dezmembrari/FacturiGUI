@@ -114,6 +114,7 @@ export interface AllocationPayload {
   quantity: number
   unit_price: number
   um: string
+  is_new: boolean
   vehicle: {
     numar_inmatriculare: string
     serie_sasiu: string
@@ -151,6 +152,7 @@ export interface StandaloneBonItemPayload {
   um: string
   quantity: number
   unit_price: number
+  is_new: boolean
 }
 
 export interface StandaloneBonRequestPayload {

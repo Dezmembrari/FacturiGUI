@@ -219,3 +219,6 @@ backend/exports/
 # Vue Build Files
 frontend/node_modules/
 frontend/dist/
+
+autofiller/screenshots/
+autofiller/test_agent_results/

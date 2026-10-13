@@ -388,7 +388,9 @@ async function onSeedExcelSelected(e: Event) {
 }
 
 function buildRowAllocationPayload(row: StagedRow): AllocationPayload {
-  const key = row.destinationKey
+  const is_new = row.status === 'NEW'; // Grab the missing flag!
+  const key = row.destinationKey;
+
   if (key.startsWith('dept:')) {
     return {
       part_code: row.part_code,
@@ -396,6 +398,7 @@ function buildRowAllocationPayload(row: StagedRow): AllocationPayload {
       quantity: row.quantity,
       unit_price: row.unit_price,
       um: row.um,
+      is_new: is_new,
       vehicle: null,
       departament: key.slice(5) as Department,
     }
@@ -409,6 +412,7 @@ function buildRowAllocationPayload(row: StagedRow): AllocationPayload {
         quantity: row.quantity,
         unit_price: row.unit_price,
         um: row.um,
+        is_new: is_new,
         vehicle: {
           numar_inmatriculare: car.numar_inmatriculare,
           serie_sasiu: car.serie_sasiu,
@@ -424,6 +428,7 @@ function buildRowAllocationPayload(row: StagedRow): AllocationPayload {
     quantity: row.quantity,
     unit_price: row.unit_price,
     um: row.um,
+    is_new: is_new,
     vehicle: null,
     departament: null,
   }

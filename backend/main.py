@@ -194,6 +194,7 @@ class AllocationIn(BaseModel):
     quantity: float
     unit_price: float
     um: str = DEFAULT_UM
+    is_new: bool = False  # Added flag for the agent
     vehicle: VehicleTargetIn | None = None
     departament: Department | None = None
 
@@ -237,6 +238,7 @@ class StandaloneBonItemIn(BaseModel):
     um: str = DEFAULT_UM
     quantity: float = Field(gt=0)
     unit_price: float = Field(ge=0)
+    is_new: bool = False  # Added flag for the agent
 
 
 class StandaloneBonRequestIn(BaseModel):
@@ -567,6 +569,22 @@ def export_invoice(req: ExportRequestIn) -> ExportResponseOut:
             export_dir=EXPORT_DIR,
             db_path=DB_PATH,
         )
+        
+        # INJECT the `is_new` flags dynamically into the agent bundle data 
+        # so we don't have to break the ExportAllocation schemas
+        export_bundle = result.bundle_data
+        new_codes = {a.part_code for a in req.allocations if a.is_new}
+        
+        if export_bundle.get("factura_intrare"):
+            for item in export_bundle["factura_intrare"].get("items", []):
+                if item.get("part_code") in new_codes:
+                    item["is_new"] = True
+                    
+        for bon in export_bundle.get("bonuri_consum", []):
+            for item in bon.get("items", []):
+                if item.get("part_code") in new_codes:
+                    item["is_new"] = True
+
         return ExportResponseOut(
             winmentor_doc_nr=result.winmentor_doc_nr,
             archive_dir=result.archive_dir,
@@ -576,7 +594,7 @@ def export_invoice(req: ExportRequestIn) -> ExportResponseOut:
             invoice_lines_written=result.invoice_lines_written,
             consumption_vouchers_written=result.consumption_vouchers_written,
             nomenclature_updated=result.nomenclature_updated,
-            export_bundle=result.bundle_data,
+            export_bundle=export_bundle,
         )
     except ValueError as e:
         msg = str(e)
@@ -640,13 +658,23 @@ def export_bon_consum_standalone(req: StandaloneBonRequestIn) -> StandaloneBonRe
             deduct_from_stock=req.deduct_from_stock,
         )
         res = export_standalone_bon_consum(payload, export_dir=EXPORT_DIR, db_path=DB_PATH)
+        
+        # INJECT the `is_new` flags dynamically into the agent bundle data 
+        export_bundle = res.bundle_data
+        new_codes = {i.part_code for i in req.items if i.is_new}
+        
+        for bon in export_bundle.get("bonuri_consum", []):
+            for item in bon.get("items", []):
+                if item.get("part_code") in new_codes:
+                    item["is_new"] = True
+                    
         return StandaloneBonResponseOut(
             doc_number=res.doc_number,
             archive_dir=res.archive_dir,
             bon_cons_path=res.bon_cons_path,
             lines_written=res.lines_written,
             total_valoare=res.total_valoare,
-            export_bundle=res.bundle_data,
+            export_bundle=export_bundle,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
