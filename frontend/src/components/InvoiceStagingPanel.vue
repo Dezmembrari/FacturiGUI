@@ -36,6 +36,7 @@ export interface QuoteQueueItem {
   state: 'queued' | 'extracting' | 'ready' | 'exported' | 'error'
   errorMsg: string | null
   supplierName: string
+  supplierCif: string | null // <-- ADDED CIF TO INTERFACE
   documentCode: string
   quoteDate: string
   tvaPercent: number
@@ -697,15 +698,7 @@ async function runLiveSearch() {
               ({{ unresolvedConflictsCount }} conflicts)
             </span>
           </button>
-
-          <button
-            v-if="nextReadyQuote"
-            class="btn btn-primary"
-            :disabled="currentQuote.rows.length === 0"
-            @click="emit('export', true)"
-          >
-            Export & Next in Queue →
-          </button>
+          <!-- Bulk Export Button Removed for local agent safety -->
         </div>
       </div>
 

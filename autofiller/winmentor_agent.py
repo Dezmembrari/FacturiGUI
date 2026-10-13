@@ -116,6 +116,8 @@ ROI_RULES: Dict[str, Tuple[float, float, float, float]] = {
     "title_articole.png": (0.50, 0.75, 0.10, 0.35),
     "anchor_denumire_nou.png": (0.15, 0.35, 0.20, 0.40),
     "anchor_cod_extern.png": (0.50, 0.70, 0.45, 0.65),
+    "cod_fiscal.png": (0.15, 0.60, 0.10, 0.90),      # Broad ROI for the popup columns
+    "title_furnizori.png": (0.15, 0.60, 0.10, 0.90), # Title bar of the supplier search window
 }
 
 # ---------------------------------------------------------------------------
@@ -575,14 +577,96 @@ def click_image(img_name: str, offset_x: int = 0, offset_y: int = 0, timeout: fl
     time.sleep(0.2)
 
 
-def wait_for_vanish(img_name: str, check_interval: float = 0.5, max_wait: float = 1800.0) -> None:
+def wait_for_vanish(img_name: str, check_interval: float = 0.5, max_wait: float = 1800.0, crop_left_half: bool = False) -> None:
+    """Waits for an element to disappear. If crop_left_half is True, it dynamically chops the 
+    template to ignore any text that was typed into the neighboring input field."""
     log.info("Waiting for operator (until %s disappears)", img_name)
     start = time.time()
-    while locate_image(img_name, timeout=0.0) is not None:
+    
+    tmpl = load_template(img_name)
+    if crop_left_half:
+        _, w = tmpl.shape[:2]
+        tmpl = tmpl[:, :int(w * 0.45)] # Keep only the left 45% (the red label)
+
+    misses = 0
+    while True:
         if time.time() - start > max_wait:
             raise TimeoutError(f"Operator did not close {img_name} within {max_wait:.0f}s.")
+            
+        screen = grab_bgr()
+        roi_bounds = ROI_RULES.get(img_name)
+        if roi_bounds:
+            screen_h, screen_w = screen.shape[:2]
+            y1, y2 = int(screen_h * roi_bounds[0]), int(screen_h * roi_bounds[1])
+            x1, x2 = int(screen_w * roi_bounds[2]), int(screen_w * roi_bounds[3])
+            sub_screen = screen[y1:y2, x1:x2]
+        else:
+            sub_screen = screen
+            
+        if tmpl.shape[0] <= sub_screen.shape[0] and tmpl.shape[1] <= sub_screen.shape[1]:
+            res = cv2.matchTemplate(sub_screen, tmpl, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(res)
+        else:
+            max_val = 0.0
+            
+        if max_val < CONFIDENCE:
+            misses += 1
+            if misses >= 3: # Require it to be missing for ~1.5 seconds to avoid flicker bugs
+                break
+        else:
+            misses = 0
+            
         time.sleep(check_interval)
+        
     log.info("Window closed. Resuming automation.")
+    time.sleep(0.5)
+
+
+def wait_for_window_close_dynamic(max_wait: float = 1800.0) -> None:
+    """
+    Takes a snapshot of the center of the modal window and waits for it to drastically change.
+    This flawlessly detects when the operator presses Save (Alt+Z) and the modal disappears.
+    """
+    log.info("Waiting for operator to save and close the popup...")
+    start = time.time()
+    
+    # Give the UI a tiny moment to settle after typing
+    time.sleep(0.5)
+    
+    screen_w, screen_h = pyautogui.size()
+    cx, cy = screen_w // 2, screen_h // 2
+    
+    # Grab a large 400x400 box in the center of the screen (the grey popup window)
+    box_size = 400
+    left = cx - (box_size // 2)
+    top = cy - (box_size // 2)
+    
+    anchor_patch = pyautogui.screenshot(region=(left, top, box_size, box_size))
+    anchor_bgr = cv2.cvtColor(np.array(anchor_patch), cv2.COLOR_RGB2BGR)
+    
+    misses = 0
+    while True:
+        if time.time() - start > max_wait:
+            raise TimeoutError(f"Operator did not close the popup within {max_wait:.0f}s.")
+            
+        current_patch = pyautogui.screenshot(region=(left, top, box_size, box_size))
+        current_bgr = cv2.cvtColor(np.array(current_patch), cv2.COLOR_RGB2BGR)
+        
+        res = cv2.matchTemplate(current_bgr, anchor_bgr, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
+        
+        # When the modal closes, the grey window is replaced by the grid.
+        # This causes a massive pixel change, dropping max_val far below 0.60.
+        if max_val < 0.60:
+            misses += 1
+            if misses >= 3:
+                break
+        else:
+            misses = 0
+            
+        time.sleep(0.5)
+        
+    log.info("Popup closed! Resuming automation.")
     time.sleep(0.5)
 
 
@@ -661,13 +745,17 @@ def add_grid_items(items: list[dict[str, Any]]) -> None:
             type_text(str(item.get("part_code", "")).upper())
 
             log.info("Awaiting Operator Save (Alt+Z)...")
-            wait_for_vanish("anchor_denumire_nou.png")
-
-        # 3. Incremental Search & Data Entry Loop
-        # Type part code directly into the active Cod Extern field
-        type_text(str(item.get("part_code", "")))
-        time.sleep(0.2)
-        pyautogui.press("enter")
+            
+            # The dynamic watcher waits flawlessly for the window to vanish!
+            wait_for_window_close_dynamic()
+            
+            # Since the operator pressed Save, WinMentor jumps directly to Quantity. We SKIP searching!
+        else:
+            # 3. Incremental Search (ONLY FOR EXISTING PARTS)
+            # Type part code directly into the active Cod Extern field
+            type_text(str(item.get("part_code", "")))
+            time.sleep(0.2)
+            pyautogui.press("enter")
         
         # 4. Tiny Popup 1: Cantitate (Quantity)
         time.sleep(0.3)
@@ -707,13 +795,42 @@ def execute_factura_intrare(factura: dict[str, Any]) -> None:
         take_debug_screenshot("anchor_furnizor.png")
         raise TimeoutError("Factura window did not open in time.")
 
-    # Furnizor (Alt+F)
+    # Furnizor List (Alt+F)
     press_alt_shortcut("f")
-    time.sleep(0.2)
-    clean_furnizor = clean_company_name(factura.get("furnizor", ""))
-    type_text(clean_furnizor)
-    pyautogui.press("enter")
-    time.sleep(0.3)
+    time.sleep(0.5)
+
+    raw_cif = factura.get("furnizor_cif")
+    cif_typed = False
+
+    # Attempt 1: Search by CIF if available
+    if raw_cif:
+        clean_cif = re.sub(r'[^0-9]', '', str(raw_cif))
+        if clean_cif:
+            log.info("Using Cod Fiscal for Supplier Search: %s", clean_cif)
+            try:
+                # Click the CIF column header to sort/search by it
+                click_image("cod_fiscal.png", timeout=2.0)
+                time.sleep(0.2)
+                type_text(clean_cif)
+                pyautogui.press("enter")
+                time.sleep(0.5)
+                cif_typed = True
+            except TimeoutError:
+                log.warning("cod_fiscal.png not found on screen. Falling back to Name search.")
+
+    # Attempt 2: Search by Name (Fallback)
+    if not cif_typed:
+        log.info("No CIF found or CIF search failed. Defaulting to Name search.")
+        clean_furnizor = clean_company_name(factura.get("furnizor", ""))
+        type_text(clean_furnizor)
+        pyautogui.press("enter")
+        time.sleep(0.5)
+
+    # Safety Check: Did the search window close?
+    # If the supplier doesn't exist, WinMentor keeps the search popup open.
+    if locate_image("title_furnizori.png", timeout=0.5):
+        log.warning("Supplier not found automatically! Waiting for operator to select/create supplier...")
+        wait_for_vanish("title_furnizori.png")
 
     # Numar (Alt+N)
     press_alt_shortcut("n")

@@ -111,6 +111,7 @@ class ExportLogOut(BaseModel):
 
 class QuoteUploadResponse(BaseModel):
     supplier_name: str
+    supplier_cif: str | None = None  # Added CIF for the frontend
     document_code: str
     winmentor_doc_nr: str
     quote_date: str
@@ -345,6 +346,7 @@ def upload_quote(file: UploadFile = File(...)) -> QuoteUploadResponse:
 
         return QuoteUploadResponse(
             supplier_name=quote.supplier_name,
+            supplier_cif=getattr(quote, "supplier_cif", None),  # Inject the extracted CIF
             document_code=quote.document_code,
             winmentor_doc_nr=extract_winmentor_doc_number(quote.document_code),
             quote_date=quote.quote_date,
@@ -576,6 +578,9 @@ def export_invoice(req: ExportRequestIn) -> ExportResponseOut:
         new_codes = {a.part_code for a in req.allocations if a.is_new}
         
         if export_bundle.get("factura_intrare"):
+            # INJECT CIF FOR THE AGENT
+            export_bundle["factura_intrare"]["furnizor_cif"] = req.supplier_cif 
+            
             for item in export_bundle["factura_intrare"].get("items", []):
                 if item.get("part_code") in new_codes:
                     item["is_new"] = True

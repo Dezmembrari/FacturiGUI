@@ -63,6 +63,7 @@ const fallbackQuote = ref<QuoteQueueItem>({
   state: 'ready',
   errorMsg: null,
   supplierName: '',
+  supplierCif: null, // <-- ADDED
   documentCode: '',
   quoteDate: '',
   tvaPercent: 21,
@@ -254,6 +255,7 @@ function enqueueQuoteFiles(fileList: FileList | File[]) {
       state: 'queued',
       errorMsg: null,
       supplierName: '',
+      supplierCif: null, // <-- ADDED
       documentCode: '',
       quoteDate: '',
       tvaPercent: 21,
@@ -290,6 +292,7 @@ async function processQuoteQueue() {
       try {
         const data = await uploadQuoteFile(nextItem.file)
         nextItem.supplierName = data.supplier_name
+        nextItem.supplierCif = data.supplier_cif || null // <-- ADDED CIF ASSIGNMENT
         nextItem.documentCode = data.winmentor_doc_nr || data.document_code
         nextItem.quoteDate = data.quote_date
         nextItem.validationIssues = data.validation_issues
@@ -388,7 +391,7 @@ async function onSeedExcelSelected(e: Event) {
 }
 
 function buildRowAllocationPayload(row: StagedRow): AllocationPayload {
-  const is_new = row.status === 'NEW'; // Grab the missing flag!
+  const is_new = row.status === 'NEW'; 
   const key = row.destinationKey;
 
   if (key.startsWith('dept:')) {
@@ -442,6 +445,7 @@ async function handleExport(advanceToNext: boolean) {
     const allocations = q.rows.map((r) => buildRowAllocationPayload(r))
     const res = await submitExport({
       supplier_name: q.supplierName,
+      supplier_cif: q.supplierCif, // <-- ADDED CIF TO PAYLOAD
       document_code: q.documentCode,
       quote_date: q.quoteDate,
       tva_percent: q.tvaPercent,
@@ -630,35 +634,34 @@ function cancelForceExport() {
       @error="(msg) => (errorMessage = msg)"
     />
 
-    <!-- Duplicate Warning Modal -->
-    <div
-      v-if="showDuplicateModal"
-      class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50"
-    >
-      <div class="bg-white p-6 rounded-lg shadow-xl max-w-md w-full border border-red-200">
-        <h3 class="text-xl font-bold text-red-600 mb-2 flex items-center gap-2">
-          <span class="text-2xl">⚠️</span> Duplicate Detected
-        </h3>
-        
-        <p class="mb-4 text-gray-700">
-          The invoice from <strong>{{ duplicateModalSupplier }}</strong> 
-          (Nr. <code>#{{ duplicateModalDocNr }}</code>) has already been exported to WinMentor. 
-        </p>
-        <p class="mb-6 text-gray-600 text-sm">
-          Exporting it again will create duplicate entries in your database and WinMentor. Are you sure you want to proceed?
-        </p>
-        
-        <div class="flex justify-end space-x-3">
+    <!-- Stylized Duplicate Warning Modal (Removed Tailwind, matched App styles) -->
+    <div v-if="showDuplicateModal" class="modal-overlay">
+      <div class="modal-content duplicate-modal">
+        <div class="modal-header">
+          <h3 style="color: #dc2626; display: flex; align-items: center; gap: 0.5rem; margin: 0;">
+            <span style="font-size: 1.5rem;">⚠️</span> Duplicate Detected
+          </h3>
+        </div>
+        <div class="modal-body" style="margin-top: 1rem; color: #374151;">
+          <p>
+            The invoice from <strong>{{ duplicateModalSupplier }}</strong> 
+            (Nr. <code>#{{ duplicateModalDocNr }}</code>) has already been exported to WinMentor. 
+          </p>
+          <p class="subtext" style="margin-top: 0.75rem;">
+            Exporting it again will create duplicate entries in your database and WinMentor. Are you sure you want to proceed?
+          </p>
+        </div>
+        <div class="modal-footer">
           <button
+            class="btn btn-secondary"
             @click="cancelForceExport"
-            class="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 font-medium transition-colors"
           >
             Cancel
           </button>
-          
           <button
+            class="btn btn-primary"
+            style="background-color: #dc2626; border-color: #b91c1c; color: white;"
             @click="confirmForceExport"
-            class="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 font-bold shadow-sm transition-colors"
           >
             Force Export
           </button>
@@ -676,5 +679,39 @@ function cancelForceExport() {
   border-bottom: 1px solid #bae6fd;
   display: flex;
   justify-content: flex-end;
+}
+
+/* Modal Styling to match standard app aesthetics */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.modal-content {
+  background: white;
+  padding: 1.5rem;
+  border-radius: 8px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+  max-width: 450px;
+  width: 100%;
+}
+
+.duplicate-modal {
+  border-top: 4px solid #dc2626;
+}
+
+.modal-footer {
+  margin-top: 1.5rem;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
 }
 </style>

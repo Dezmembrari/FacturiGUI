@@ -36,6 +36,7 @@ export interface ExportLogEntry {
 
 export interface QuoteUploadResponse {
   supplier_name: string
+  supplier_cif: string | null  // Added for CIF extraction
   document_code: string
   winmentor_doc_nr: string
   quote_date: string
@@ -127,7 +128,7 @@ export interface ExportRequestPayload {
   supplier_name: string
   document_code: string
   quote_date: string
-  supplier_cif?: string | null
+  supplier_cif?: string | null  // Added to match backend
   tva_percent: number
   gestiune: string
   allow_duplicate: boolean

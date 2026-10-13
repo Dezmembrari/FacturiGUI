@@ -64,6 +64,10 @@ class PartItem(BaseModel):
 
 class SupplierQuote(BaseModel):
     supplier_name: str = Field(description="Name of the auto parts supplier.")
+    supplier_cif: str | None = Field(
+        default=None,
+        description="The CUI / Cod Fiscal / CIF of the supplier (e.g., 'RO1234567', '1234567')."
+    )
     document_code: str = Field(
         description="The unique invoice or offer number (Numar factura / Numar oferta)."
     )
@@ -230,6 +234,7 @@ def extract_quote_data(file_path: str) -> SupplierQuote:
     - Sprint Car Distribution: NEVER use 'Cod articol client' (like '7564H.3500') or the 13-digit EAN barcode. Extract the code embedded inside the description (like '37180074G', '37130080G', '9010050', or paint code 'MB518'), or the main uppercase noun ('CATALIZ', 'FOND', 'CHIT', 'LAC') if no manufacturer code is present.
     - Always extract unit prices and line totals WITHOUT VAT (fara TVA).
     - Convert the document date to YYYY-MM-DD.
+    - Extract the supplier's CUI/CIF (Cod de inregistrare fiscala) if present.
     """
     gemini_file = client.files.upload(file=file_path)
     try:
