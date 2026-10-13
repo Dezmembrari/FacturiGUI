@@ -163,6 +163,7 @@ async function handleGenerateBon() {
         um: i.um,
         quantity: i.quantity,
         unit_price: i.unit_price,
+        is_new: false, // <-- Fix for TypeScript: Explicitly declaring items from the cart are not new.
       })),
       deduct_from_stock: deductFromStock.value,
     }
